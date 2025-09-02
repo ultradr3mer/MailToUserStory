@@ -95,11 +95,6 @@ CREATE TABLE IF NOT EXISTS ProcessedEmails(
   processed_at TEXT NOT NULL,
   outcome TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS Lease(
-  id INTEGER PRIMARY KEY CHECK(id=1),
-  owner TEXT,
-  expires_at TEXT
-);
 ";
     cmd.ExecuteNonQuery();
   }
