@@ -86,47 +86,45 @@ return;
 
 async Task<bool> ProcessMessage(string mailbox, Microsoft.Graph.Models.Message msg)
 {
+  if (db.WasProcessed(msg.Id!)) return false;
+  if (GraphConnector.IsSelf(mailbox, msg)) { db.MarkProcessed(msg.Id!, mailbox, null, "skipped-self"); return false; }
+
+  int? usId = Util.ParseUserStoryId(msg.Subject);
+  try
   {
-    if (db.WasProcessed(msg.Id!)) return false;
-    if (GraphConnector.IsSelf(mailbox, msg)) { db.MarkProcessed(msg.Id!, mailbox, null, "skipped-self"); return false; }
-
-    int? usId = Util.ParseUserStoryId(msg.Subject);
-    try
+    if (usId is int existingId)
     {
-      if (usId is int existingId)
+      // Update existing story
+      if (!await TfsConnector.WorkItemExistsAsync(wit, existingId))
       {
-        // Update existing story
-        if (!await TfsConnector.WorkItemExistsAsync(wit, existingId))
-        {
-          await GraphConnector.SendErrorReplyAsync(graph, mailbox, msg, "User Story #" + existingId + " was not found in TFS.");
-          db.MarkProcessed(msg.Id!, mailbox, null, "us-not-found");
-          return false;
-        }
-
-        var prepared = await Util.PrepareContentAsync(graph, mailbox, msg, mdConverter);
-        await TfsConnector.AddCommentAndAttachmentsAsync(wit, app.Tfs.Project, existingId, prepared.markdown, prepared.attachments);
-        await GraphConnector.SendInfoReplyAsync(graph, mailbox, msg, "User Story [US#" + existingId + "] was updated.", null);
-        db.MarkProcessed(msg.Id!, mailbox, existingId, "updated");
+        await GraphConnector.SendErrorReplyAsync(graph, mailbox, msg, "User Story #" + existingId + " was not found in TFS.");
+        db.MarkProcessed(msg.Id!, mailbox, null, "us-not-found");
+        return false;
       }
-      else
-      {
-        // Create new user story
-        var prepared = await Util.PrepareContentAsync(graph, mailbox, msg, mdConverter);
-        int newId = await TfsConnector.CreateUserStoryAsync(wit, app.Tfs.Project, msg.Subject ?? "(no subject)", prepared.markdown);
-        if (prepared.attachments.Count > 0)
-          await TfsConnector.AddAttachmentsAsync(wit, app.Tfs.Project, newId, prepared.attachments);
 
-        db.LinkStory(mailbox, newId);
-        await GraphConnector.SendInfoReplyAsync(graph, mailbox, msg,
-            "Created new User Story [US#" + newId + "] from your email.", subjectSuffix: " [US#" + newId + "]");
-        db.MarkProcessed(msg.Id!, mailbox, newId, "created");
-      }
+      var prepared = await Util.PrepareContentAsync(graph, mailbox, msg, mdConverter);
+      await TfsConnector.AddCommentAndAttachmentsAsync(wit, app.Tfs.Project, existingId, prepared.markdown, prepared.attachments);
+      await GraphConnector.SendInfoReplyAsync(graph, mailbox, msg, "User Story [US#" + existingId + "] was updated.", null);
+      db.MarkProcessed(msg.Id!, mailbox, existingId, "updated");
     }
-    catch (Exception ex)
+    else
     {
-      Console.Error.WriteLine("Error processing " + msg.Id + ": " + ex);
-      throw; // per requirement
+      // Create new user story
+      var prepared = await Util.PrepareContentAsync(graph, mailbox, msg, mdConverter);
+      int newId = await TfsConnector.CreateUserStoryAsync(wit, app.Tfs.Project, msg.Subject ?? "(no subject)", prepared.markdown);
+      if (prepared.attachments.Count > 0)
+        await TfsConnector.AddAttachmentsAsync(wit, app.Tfs.Project, newId, prepared.attachments);
+
+      db.LinkStory(mailbox, newId);
+      await GraphConnector.SendInfoReplyAsync(graph, mailbox, msg,
+          "Created new User Story [US#" + newId + "] from your email.", subjectSuffix: " [US#" + newId + "]");
+      db.MarkProcessed(msg.Id!, mailbox, newId, "created");
     }
+  }
+  catch (Exception ex)
+  {
+    Console.Error.WriteLine("Error processing " + msg.Id + ": " + ex);
+    throw; // per requirement
   }
 
   return true;

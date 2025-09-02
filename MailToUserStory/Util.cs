@@ -11,20 +11,19 @@ namespace MailToUserStory
   {
     public static async Task<(string markdown, List<AttachmentPayload> attachments)> PrepareContentAsync(GraphServiceClient graph, string mailbox, Message msg, ReverseMarkdown.Converter converter)
     {
-      string markdown = HtmlToMarkdown(msg.Body, converter);
       var attachments = new List<AttachmentPayload>();
-      if (msg.HasAttachments == true)
+
+      var container = await GraphConnector.GetFileAttachmentsAsync(graph, mailbox, msg.Id!);
+      foreach (var fa in container.FileAttachments)
       {
-        var files = await GraphConnector.GetFileAttachmentsAsync(graph, mailbox, msg.Id!);
-        foreach (var fa in files)
+        attachments.Add(new AttachmentPayload
         {
-          attachments.Add(new AttachmentPayload
-          {
-            FileName = fa.Name!,
-            Bytes = fa.ContentBytes!
-          });
-        }
+          FileName = fa.Name!,
+          Bytes = fa.ContentBytes!
+        });
       }
+
+      string html = SanitizeHtml(msg.Body, converter, container.InlineAttachments);
 
       var meta = new StringBuilder();
       meta.AppendLine();
@@ -32,21 +31,34 @@ namespace MailToUserStory
       meta.AppendLine("> From: " + msg.From?.EmailAddress?.Name + " <" + msg.From?.EmailAddress?.Address + ">");
       meta.AppendLine("> Received: " + (msg.ReceivedDateTime.HasValue ? msg.ReceivedDateTime.Value.ToString("O") : ""));
 
-      return (markdown + "\n\n" + meta.ToString(), attachments);
+      return (html + "\n\n" + meta.ToString(), attachments);
     }
 
-    public static string HtmlToMarkdown(ItemBody? body, ReverseMarkdown.Converter converter)
+    public static string SanitizeHtml(ItemBody? body, ReverseMarkdown.Converter converter, List<FileAttachment> inlineAttachments)
     {
       if (body == null) return "(no content)";
       if (body.ContentType == BodyType.Text) return string.IsNullOrWhiteSpace(body.Content) ? "(no content)" : body.Content!.Trim();
 
       var html = body.Content ?? string.Empty;
+
+      foreach (var att in inlineAttachments)
+      {
+        if (att.IsInline == true && !string.IsNullOrEmpty(att.ContentId) && att.ContentBytes != null)
+        {
+          var base64 = Convert.ToBase64String(att.ContentBytes);
+          var mime = att.ContentType ?? "image/png"; // guess if null
+          html = html.Replace(
+              $"cid:{att.ContentId}",
+              $"data:{mime};base64,{base64}"
+          );
+        }
+      }
+
       var doc = new HtmlDocument();
       doc.LoadHtml(html);
       foreach (var n in doc.DocumentNode.SelectNodes("//script|//style") ?? new HtmlNodeCollection(doc.DocumentNode)) n.Remove();
       string sanitized = doc.DocumentNode.InnerHtml;
-      string md = converter.Convert(sanitized);
-      return md.Trim();
+      return "<div>" + sanitized + "</div>";
     }
 
     public static int? ParseUserStoryId(string? subject)

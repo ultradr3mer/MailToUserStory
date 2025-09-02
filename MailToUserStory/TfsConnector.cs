@@ -26,7 +26,7 @@ namespace MailToUserStory
       var patch = new JsonPatchDocument
     {
         new JsonPatchOperation { Operation = Operation.Add, Path = "/fields/System.Title", Value = title },
-        new JsonPatchOperation { Operation = Operation.Add, Path = "/fields/System.Description", Value = MarkdownAsHtml(descriptionMarkdown) }
+        new JsonPatchOperation { Operation = Operation.Add, Path = "/fields/System.Description", Value = descriptionMarkdown }
     };
       var wi = await wit.CreateWorkItemAsync(patch, project, "User Story");
       return wi.Id ?? throw new Exception("No ID returned from CreateWorkItemAsync");
@@ -36,7 +36,7 @@ namespace MailToUserStory
     {
       var patch = new JsonPatchDocument
     {
-        new JsonPatchOperation { Operation = Operation.Add, Path = "/fields/System.History", Value = MarkdownAsHtml(commentMarkdown) }
+        new JsonPatchOperation { Operation = Operation.Add, Path = "/fields/System.History", Value = commentMarkdown }
     };
 
       foreach (var a in attachments)
@@ -70,12 +70,6 @@ namespace MailToUserStory
         });
       }
       _ = await wit.UpdateWorkItemAsync(patch, id);
-    }
-
-    static string MarkdownAsHtml(string md)
-    {
-      string escaped = System.Net.WebUtility.HtmlEncode(md).Replace("\n", "<br/>");
-      return "<div>" + escaped + "</div>";
     }
   }
 }

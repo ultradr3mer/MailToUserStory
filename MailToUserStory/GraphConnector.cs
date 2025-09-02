@@ -66,16 +66,23 @@ namespace MailToUserStory
     public static bool IsSelf(string mailbox, Message msg)
         => string.Equals(msg.From?.EmailAddress?.Address, mailbox, StringComparison.OrdinalIgnoreCase);
 
-    public static async Task<List<FileAttachment>> GetFileAttachmentsAsync(GraphServiceClient graph, string mailbox, string messageId)
+    public static async Task<AttachmentContainer> GetFileAttachmentsAsync(GraphServiceClient graph, string mailbox, string messageId)
     {
-      var result = new List<FileAttachment>();
+      var fileAttachments = new List<FileAttachment>();
+      var inlineAttachments = new List<FileAttachment>();
       var page = await graph.Users[mailbox].Messages[messageId].Attachments.GetAsync();
       foreach (var att in page?.Value ?? Enumerable.Empty<Attachment>())
       {
-        if (att is FileAttachment fa && fa.ContentBytes != null)
-          result.Add(fa);
+        if (!(att is FileAttachment fa) || fa.ContentBytes == null)
+          continue;
+
+        if (att.IsInline == true)
+          inlineAttachments.Add(fa);
+        else
+          fileAttachments.Add(fa);
       }
-      return result;
+
+      return new AttachmentContainer() { FileAttachments = fileAttachments, InlineAttachments = inlineAttachments };
     }
 
     public static async Task SendInfoReplyAsync(GraphServiceClient graph, string mailbox, Message original, string infoBody, string? subjectSuffix)
