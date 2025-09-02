@@ -8,7 +8,6 @@ namespace MailToUserStory
 {
   public record AppConfig
   {
-    public required string Project { get; init; }
     public required GraphConfig Graph { get; init; }
     public required TfsConfig Tfs { get; init; }
     public PollingConfig Polling { get; init; } = new();
@@ -27,7 +26,8 @@ namespace MailToUserStory
       public required string BaseUrl { get; init; }
       public required string ProjectCollection { get; init; }
       public required string Project { get; init; }
-      public string? Pat { get; init; }
+      public string? User { get; init; }
+      public string Password { get; init; }
     }
 
     public record PollingConfig { public int Minutes { get; init; } = 5; }

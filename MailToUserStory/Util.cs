@@ -52,7 +52,7 @@ namespace MailToUserStory
     public static int? ParseUserStoryId(string? subject)
     {
       if (string.IsNullOrEmpty(subject)) return null;
-      var rx = new Regex(@"\[US:(?<id>\d+)\]", RegexOptions.IgnoreCase);
+      var rx = new Regex(@"\[US#(?<id>\d+)\]", RegexOptions.IgnoreCase);
 
       var m = rx.Match(subject);
       if (m.Success && int.TryParse(m.Groups["id"].Value, out var id)) return id;
