@@ -1,29 +1,23 @@
-﻿// GraphToTfsUserStories — single‑file, top‑level .NET 8 CLI
-// ---------------------------------------------------------
-// What it does
-//  - Polls Microsoft Graph mailboxes via delta queries
-//  - Creates/updates **User Story** work items in on‑prem TFS
-//  - Stores delta tokens + processed message ids in SQLite
-//  - Replies to the sender with a canonical token subject: "[US#12345]"
-//  - Converts HTML email bodies to Markdown, uploads attachments
-//  - Simple single‑instance lease (SQLite) to avoid overlap
+﻿// GraphToTfsUserStories — .NET 8 CLI using SDKs
+// -------------------------------------------------
+// Uses Microsoft Graph SDK + Azure.Identity and Azure DevOps/TFS .NET client (REST) for cleaner code.
+// - Graph: delta queries, reply (draft + subject token), attachments
+// - TFS (on-prem): create/update User Story, add comments, upload attachments
+// - SQLite: delta tokens + processed message ids + lease
 //
-// How to use
-//  1) Create a new console project and replace Program.cs with this file.
-//     dotnet new console -n GraphToTfsUserStories -f net8.0
-//  2) Add packages:
-//     dotnet add package Microsoft.Data.Sqlite
-//     dotnet add package Microsoft.Extensions.Configuration
-//     dotnet add package Microsoft.Extensions.Configuration.Json
-//     dotnet add package Microsoft.Extensions.Configuration.UserSecrets
-//     dotnet add package Microsoft.Extensions.Configuration.Binder
-//     dotnet add package HtmlAgilityPack
-//     dotnet add package ReverseMarkdown
-//  3) Add a UserSecretsId to your .csproj (any GUID) to enable dotnet user‑secrets.
-//  4) Configure appsettings.json (example below) and user‑secrets:
-//       dotnet user-secrets set "Graph:ClientSecret" "<client-secret>"
-//       dotnet user-secrets set "Tfs:Pat" "<tfs-pat>"
-//  5) Run it (one shot); schedule externally (Task Scheduler, cron, etc.).
+// Quick start
+//   dotnet new console -n GraphToTfsUserStories -f net8.0
+//   dotnet add package Microsoft.Graph
+//   dotnet add package Azure.Identity
+//   dotnet add package Microsoft.Data.Sqlite
+//   dotnet add package Microsoft.Extensions.Configuration
+//   dotnet add package Microsoft.Extensions.Configuration.Json
+//   dotnet add package Microsoft.Extensions.Configuration.UserSecrets
+//   dotnet add package Microsoft.Extensions.Configuration.Binder
+//   dotnet add package HtmlAgilityPack
+//   dotnet add package ReverseMarkdown
+//   dotnet add package Microsoft.TeamFoundationServer.Client
+//   dotnet add package Microsoft.VisualStudio.Services.Client
 //
 // appsettings.json (example)
 // {
@@ -34,26 +28,31 @@
 //     "Mailboxes": ["support@contoso.local", "sales@contoso.local"]
 //   },
 //   "Tfs": {
-//     "BaseUrl": "http://tfs:8080/tfs/DefaultCollection/ContosoProject",
-//     "ApiVersion": "3.2"
+//     "BaseUrl": "http://tfs:8080/tfs/DefaultCollection",
+//     "ProjectCollection": "DefaultCollection",
+//     "Project": "ContosoProject"
 //   },
 //   "Polling": { "Minutes": 5 },
 //   "DatabasePath": "stories.db"
 // }
-//
-// Notes
-//  - This targets **on‑prem TFS** REST APIs. PAT is used via Basic auth (username blank).
-//  - Replies are sent using Graph createReply + send to preserve threading.
-//  - Error policy: throw; rely on external supervisor to re-run.
-//  - Adjust TFS ApiVersion to match your TFS (e.g., 2.0, 3.2). For TFS 2018, 3.2 is typical.
+// user-secrets:
+//   dotnet user-secrets set "Graph:ClientSecret" "<client-secret>"
+//   dotnet user-secrets set "Tfs:Pat" "<tfs-pat>"
 
+using Azure.Identity;
 using HtmlAgilityPack;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
-using System.Net.Http.Headers;
+using Microsoft.Graph;
+using Microsoft.Graph.Models;
+using Microsoft.Graph.Users.Item.MailFolders.Item.Messages.Delta;
+using Microsoft.TeamFoundation.WorkItemTracking.WebApi;
+using Microsoft.TeamFoundation.WorkItemTracking.WebApi.Models;
+using Microsoft.VisualStudio.Services.Common;
+using Microsoft.VisualStudio.Services.WebApi;
+using System.Net;
+using System.Net.Mail;
 using System.Text;
-using System.Text.Json;
-using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using System.Xml;
 
@@ -73,15 +72,16 @@ record GraphConfig
 {
   public required string TenantId { get; init; }
   public required string ClientId { get; init; }
-  public string? ClientSecret { get; init; } // pulled from user-secrets at runtime
+  public string? ClientSecret { get; init; }
   public required string[] Mailboxes { get; init; }
 }
 
 record TfsConfig
 {
-  public required string BaseUrl { get; init; } // e.g., http://tfs:8080/tfs/DefaultCollection/Project
-  public string ApiVersion { get; init; } = "3.2";
-  public string? Pat { get; init; } // pulled from user-secrets
+  public required string BaseUrl { get; init; }
+  public required string ProjectCollection { get; init; }
+  public required string Project { get; init; }
+  public string? Pat { get; init; }
 }
 
 record PollingConfig { public int Minutes { get; init; } = 5; }
@@ -101,22 +101,24 @@ app = app with
   Graph = app.Graph with { ClientSecret = config["Graph:ClientSecret"] ?? app.Graph.ClientSecret },
   Tfs = app.Tfs with { Pat = config["Tfs:Pat"] ?? app.Tfs.Pat }
 };
-
 Assert(!string.IsNullOrWhiteSpace(app.Graph.ClientSecret), "Graph:ClientSecret missing (user-secrets)");
 Assert(!string.IsNullOrWhiteSpace(app.Tfs.Pat), "Tfs:Pat missing (user-secrets)");
 
 using var db = new Db(app.DatabasePath);
 InitializeSchema(db);
-
-// Acquire single-instance lease
 using var lease = await Lease.AcquireAsync(db, TimeSpan.FromMinutes(Math.Max(app.Polling.Minutes, 10)));
 
-using var http = new HttpClient();
-http.Timeout = TimeSpan.FromSeconds(100);
-var graph = new GraphClient(http, app.Graph.TenantId, app.Graph.ClientId, app.Graph.ClientSecret!);
-var tfs = new TfsClient(http, app.Tfs.BaseUrl.TrimEnd('/'), app.Tfs.ApiVersion, app.Tfs.Pat!);
+// Graph SDK client
+var credential = new ClientSecretCredential(app.Graph.TenantId, app.Graph.ClientId, app.Graph.ClientSecret);
+var scopes = new[] { "https://graph.microsoft.com/.default" };
+var graph = new GraphServiceClient(credential, scopes);
 
-var converter = new ReverseMarkdown.Converter(new ReverseMarkdown.Config
+// TFS/ADO client (REST)
+var tfsUri = new Uri(app.Tfs.BaseUrl);
+var connection = new VssConnection(tfsUri, new VssBasicCredential(string.Empty, app.Tfs.Pat));
+var wit = await connection.GetClientAsync<WorkItemTrackingHttpClient>();
+
+var mdConverter = new ReverseMarkdown.Converter(new ReverseMarkdown.Config
 {
   GithubFlavored = true,
   UnknownTags = ReverseMarkdown.Config.UnknownTagsOption.Bypass
@@ -124,68 +126,52 @@ var converter = new ReverseMarkdown.Converter(new ReverseMarkdown.Config
 
 foreach (var mailbox in app.Graph.Mailboxes)
 {
-  Console.WriteLine($"Processing mailbox: {mailbox}");
+  Console.WriteLine("Processing " + mailbox);
   string? deltaLink = db.GetDeltaLink(mailbox);
 
-  await foreach (var page in graph.DeltaPagesAsync(mailbox, deltaLink))
+  await foreach (var page in DeltaPagesAsync(graph, mailbox, deltaLink))
   {
     foreach (var msg in page.Messages)
     {
-      if (db.WasProcessed(msg.Id)) continue; // idempotency
-      if (msg.From?.EmailAddress?.Address?.Equals(mailbox, StringComparison.OrdinalIgnoreCase) == true)
-      {
-        // Skip our own mailbox to avoid loops
-        db.MarkProcessed(msg.Id, mailbox, null, "skipped-self");
-        continue;
-      }
+      if (db.WasProcessed(msg.Id!)) continue;
+      if (IsSelf(mailbox, msg)) { db.MarkProcessed(msg.Id!, mailbox, null, "skipped-self"); continue; }
 
       int? usId = ParseUserStoryId(msg.Subject);
       try
       {
         if (usId is int existingId)
         {
-          // update existing US
-          bool exists = await tfs.WorkItemExistsAsync(existingId);
-          if (!exists)
+          // Update existing story
+          if (!await WorkItemExistsAsync(wit, existingId))
           {
-            await graph.SendErrorReplyAsync(mailbox, msg.Id, $"User Story #{existingId} was not found in TFS.");
-            db.MarkProcessed(msg.Id, mailbox, null, "us-not-found");
+            await SendErrorReplyAsync(graph, mailbox, msg, "User Story #" + existingId + " was not found in TFS.");
+            db.MarkProcessed(msg.Id!, mailbox, null, "us-not-found");
             continue;
           }
 
-          var (markdown, attachments) = await PrepareContentAsync(graph, mailbox, msg, converter);
-
-          await tfs.AddCommentAndAttachmentsAsync(existingId, markdown, attachments);
-
-          await graph.SendInfoReplyAsync(mailbox, msg.Id, $"User Story [US#{existingId}] was updated.", null);
-
-          db.MarkProcessed(msg.Id, mailbox, existingId, "updated");
+          var prepared = await PrepareContentAsync(graph, mailbox, msg, mdConverter);
+          await AddCommentAndAttachmentsAsync(wit, app.Tfs.Project, existingId, prepared.markdown, prepared.attachments);
+          await SendInfoReplyAsync(graph, mailbox, msg, "User Story [US#" + existingId + "] was updated.", null);
+          db.MarkProcessed(msg.Id!, mailbox, existingId, "updated");
         }
         else
         {
-          // create new US
-          var (markdown, attachments) = await PrepareContentAsync(graph, mailbox, msg, converter);
-
-          int newId = await tfs.CreateUserStoryAsync(app.Project, msg.Subject ?? "(no subject)", markdown);
-
-          if (attachments.Count > 0)
-          {
-            await tfs.AddAttachmentsAsync(newId, attachments);
-          }
+          // Create new user story
+          var prepared = await PrepareContentAsync(graph, mailbox, msg, mdConverter);
+          int newId = await CreateUserStoryAsync(wit, app.Tfs.Project, msg.Subject ?? "(no subject)", prepared.markdown);
+          if (prepared.attachments.Count > 0)
+            await AddAttachmentsAsync(wit, app.Tfs.Project, newId, prepared.attachments);
 
           db.LinkStory(mailbox, newId);
-
-          await graph.SendInfoReplyAsync(mailbox, msg.Id,
-              $"Created new User Story [US#{newId}] from your email.",
-              subjectSuffix: $" [US#{newId}]");
-
-          db.MarkProcessed(msg.Id, mailbox, newId, "created");
+          await SendInfoReplyAsync(graph, mailbox, msg,
+              "Created new User Story [US#" + newId + "] from your email.", subjectSuffix: " [US#" + newId + "]");
+          db.MarkProcessed(msg.Id!, mailbox, newId, "created");
         }
       }
       catch (Exception ex)
       {
-        Console.Error.WriteLine($"Error processing message {msg.Id}: {ex.Message}");
-        throw; // per requirements: just throw for now
+        Console.Error.WriteLine("Error processing " + msg.Id + ": " + ex);
+        throw; // per requirement
       }
     }
 
@@ -201,48 +187,202 @@ Console.WriteLine("Done.");
 return;
 
 // ----------------------------
-// Helpers & domain logic
+// Graph helpers (SDK)
 // ----------------------------
-static async Task<(string markdown, List<AttachmentPayload> attachments)> PrepareContentAsync(GraphClient graph, string mailbox, GraphMessage msg, ReverseMarkdown.Converter converter)
+static async IAsyncEnumerable<DeltaPage> DeltaPagesAsync(GraphServiceClient graph, string mailbox, string? deltaLink)
 {
-  string markdown = HtmlToMarkdown(msg.Body?.Content, converter);
+  DeltaResponse? page;
+  if (!string.IsNullOrEmpty(deltaLink))
+  {
+    // Resume from stored delta link
+    page = await graph.RequestAdapter.SendAsync<DeltaResponse>(new Microsoft.Kiota.Abstractions.RequestInformation
+    {
+      HttpMethod = Microsoft.Kiota.Abstractions.Method.GET,
+      UrlTemplate = deltaLink,
+    });
+  }
+  else
+  {
+    page = await graph.Users[mailbox]
+        .MailFolders["Inbox"].Messages.Delta
+        .GetAsync(r =>
+        {
+          r.QueryParameters.Select = new[] { "id", "subject", "from", "receivedDateTime", "hasAttachments", "body" };
+        });
+  }
 
+  while (page != null)
+  {
+    yield return new DeltaPage
+    {
+      Messages = page.Value?.ToList() ?? new List<Message>(),
+      NextLink = page.OdataNextLink,
+      DeltaLink = page.OdataDeltaLink
+    };
+
+    if (!string.IsNullOrEmpty(page.OdataNextLink))
+    {
+      page = await graph.RequestAdapter.SendAsync<DeltaResponse>(new Microsoft.Kiota.Abstractions.RequestInformation
+      {
+        HttpMethod = Microsoft.Kiota.Abstractions.Method.GET,
+        UrlTemplate = page.OdataNextLink,
+      });
+    }
+    else
+    {
+      break;
+    }
+  }
+}
+
+static bool IsSelf(string mailbox, Message msg)
+    => string.Equals(msg.From?.EmailAddress?.Address, mailbox, StringComparison.OrdinalIgnoreCase);
+
+static async Task<List<FileAttachment>> GetFileAttachmentsAsync(GraphServiceClient graph, string mailbox, string messageId)
+{
+  var result = new List<FileAttachment>();
+  var page = await graph.Users[mailbox].Messages[messageId].Attachments.GetAsync();
+  foreach (var att in page?.Value ?? Enumerable.Empty<Attachment>())
+  {
+    if (att is FileAttachment fa && fa.ContentBytes != null)
+      result.Add(fa);
+  }
+  return result;
+}
+
+static async Task SendInfoReplyAsync(GraphServiceClient graph, string mailbox, Message original, string infoBody, string? subjectSuffix)
+{
+  // Create a draft reply to preserve threading, then patch subject/body, then send
+  var draft = await graph.Users[mailbox].Messages[original.Id!].CreateReply.PostAsync(new Microsoft.Graph.Users.Item.Messages.Item.CreateReply.CreateReplyPostRequestBody
+  {
+    Message = new Message
+    {
+      Body = new ItemBody { ContentType = BodyType.Text, Content = infoBody }
+    }
+  });
+
+  if (draft == null) throw new Exception("Failed to create reply draft");
+
+  string subject = original.Subject ?? string.Empty;
+  if (!string.IsNullOrEmpty(subjectSuffix)) subject = subject + subjectSuffix;
+
+  await graph.Users[mailbox].Messages[draft.Id!].PatchAsync(new Message
+  {
+    Subject = subject,
+    Body = new ItemBody { ContentType = BodyType.Text, Content = infoBody }
+  });
+
+  await graph.Users[mailbox].Messages[draft.Id!].Send.PostAsync();
+}
+
+static Task SendErrorReplyAsync(GraphServiceClient graph, string mailbox, Message original, string errorText)
+    => SendInfoReplyAsync(graph, mailbox, original, errorText, null);
+
+// ----------------------------
+// TFS helpers (WorkItemTrackingHttpClient)
+// ----------------------------
+static async Task<bool> WorkItemExistsAsync(WorkItemTrackingHttpClient wit, int id)
+{
+  try { _ = await wit.GetWorkItemAsync(id); return true; }
+  catch (Microsoft.VisualStudio.Services.WebApi.VssServiceException ex) when (ex.Message.Contains("404")) { return false; }
+  catch (Microsoft.VisualStudio.Services.WebApi.VssServiceResponseException ex) when (ex.HttpStatusCode == HttpStatusCode.NotFound) { return false; }
+}
+
+static async Task<int> CreateUserStoryAsync(WorkItemTrackingHttpClient wit, string project, string title, string descriptionMarkdown)
+{
+  var patch = new JsonPatchDocument
+    {
+        new JsonPatchOperation { Operation = Operation.Add, Path = "/fields/System.Title", Value = title },
+        new JsonPatchOperation { Operation = Operation.Add, Path = "/fields/System.Description", Value = MarkdownAsHtml(descriptionMarkdown) }
+    };
+  var wi = await wit.CreateWorkItemAsync(patch, project, "User Story");
+  return wi.Id ?? throw new Exception("No ID returned from CreateWorkItemAsync");
+}
+
+static async Task AddCommentAndAttachmentsAsync(WorkItemTrackingHttpClient wit, string project, int id, string commentMarkdown, List<AttachmentPayload> attachments)
+{
+  var patch = new JsonPatchDocument
+    {
+        new JsonPatchOperation { Operation = Operation.Add, Path = "/fields/System.History", Value = MarkdownAsHtml(commentMarkdown) }
+    };
+
+  foreach (var a in attachments)
+  {
+    using var ms = new MemoryStream(a.Bytes);
+    var ar = await wit.CreateAttachmentAsync(ms, fileName: a.FileName);
+    patch.Add(new JsonPatchOperation
+    {
+      Operation = Operation.Add,
+      Path = "/relations/-",
+      Value = new WorkItemRelation { Rel = "AttachedFile", Url = ar.Url }
+    });
+  }
+
+  _ = await wit.UpdateWorkItemAsync(patch, id);
+}
+
+static async Task AddAttachmentsAsync(WorkItemTrackingHttpClient wit, string project, int id, List<AttachmentPayload> attachments)
+{
+  if (attachments.Count == 0) return;
+  var patch = new JsonPatchDocument();
+  foreach (var a in attachments)
+  {
+    using var ms = new MemoryStream(a.Bytes);
+    var ar = await wit.CreateAttachmentAsync(ms, fileName: a.FileName);
+    patch.Add(new JsonPatchOperation
+    {
+      Operation = Operation.Add,
+      Path = "/relations/-",
+      Value = new WorkItemRelation { Rel = "AttachedFile", Url = ar.Url }
+    });
+  }
+  _ = await wit.UpdateWorkItemAsync(patch, id);
+}
+
+static string MarkdownAsHtml(string md)
+{
+  string escaped = System.Net.WebUtility.HtmlEncode(md).Replace("\n", "<br/>");
+  return "<div>" + escaped + "</div>";
+}
+
+// ----------------------------
+// Glue: content prep + parsing
+// ----------------------------
+static async Task<(string markdown, List<AttachmentPayload> attachments)> PrepareContentAsync(GraphServiceClient graph, string mailbox, Message msg, ReverseMarkdown.Converter converter)
+{
+  string markdown = HtmlToMarkdown(msg.Body, converter);
   var attachments = new List<AttachmentPayload>();
   if (msg.HasAttachments == true)
   {
-    var atts = await graph.GetAttachmentsAsync(mailbox, msg.Id);
-    foreach (var a in atts)
+    var files = await GetFileAttachmentsAsync(graph, mailbox, msg.Id!);
+    foreach (var fa in files)
     {
-      if (a.ODataType?.EndsWith("fileAttachment", StringComparison.OrdinalIgnoreCase) == true &&
-          a.ContentBytes is not null && a.Name is not null)
+      attachments.Add(new AttachmentPayload
       {
-        attachments.Add(new AttachmentPayload
-        {
-          FileName = a.Name,
-          Bytes = Convert.FromBase64String(a.ContentBytes)
-        });
-      }
+        FileName = fa.Name!,
+        Bytes = fa.ContentBytes!
+      });
     }
   }
 
-  // Append metadata
   var meta = new StringBuilder();
   meta.AppendLine();
   meta.AppendLine("---");
-  meta.AppendLine($"> From: {msg.From?.EmailAddress?.Name} <{msg.From?.EmailAddress?.Address}>");
-  meta.AppendLine($"> Received: {msg.ReceivedDateTime:O}");
+  meta.AppendLine("> From: " + msg.From?.EmailAddress?.Name + " <" + msg.From?.EmailAddress?.Address + ">");
+  meta.AppendLine("> Received: " + (msg.ReceivedDateTime.HasValue ? msg.ReceivedDateTime.Value.ToString("O") : ""));
 
   return (markdown + "\n\n" + meta.ToString(), attachments);
 }
 
-static string HtmlToMarkdown(string? html, ReverseMarkdown.Converter converter)
+static string HtmlToMarkdown(ItemBody? body, ReverseMarkdown.Converter converter)
 {
-  if (string.IsNullOrWhiteSpace(html)) return "(no content)";
+  if (body == null) return "(no content)";
+  if (body.ContentType == BodyType.Text) return string.IsNullOrWhiteSpace(body.Content) ? "(no content)" : body.Content!.Trim();
+
+  var html = body.Content ?? string.Empty;
   var doc = new HtmlDocument();
   doc.LoadHtml(html);
-  // Remove script/style
-  foreach (var n in doc.DocumentNode.SelectNodes("//script|//style") ?? Array.Empty<HtmlNode>())
-    n.Remove();
+  foreach (var n in doc.DocumentNode.SelectNodes("//script|//style") ?? Array.Empty<HtmlNode>()) n.Remove();
   string sanitized = doc.DocumentNode.InnerHtml;
   string md = converter.Convert(sanitized);
   return md.Trim();
@@ -251,15 +391,13 @@ static string HtmlToMarkdown(string? html, ReverseMarkdown.Converter converter)
 static int? ParseUserStoryId(string? subject)
 {
   if (string.IsNullOrEmpty(subject)) return null;
-  // Accept variants like [US#123], [UserStory#123], US:123, UserStory: 123, US-123, etc.
   var rx = new Regex(@"(?ix)
         (?:\[(?:US|User\s*Story)\s*#\s*(?<id>\d{1,10})\])
         |
         (?:\b(?:US|User\s*Story)\s*[:#\-]\s*(?<id>\d{1,10})\b)
     ");
   var m = rx.Match(subject);
-  if (m.Success && int.TryParse(m.Groups["id"].Value, out var id))
-    return id;
+  if (m.Success && int.TryParse(m.Groups["id"].Value, out var id)) return id;
   return null;
 }
 
@@ -276,7 +414,7 @@ sealed class Db : IDisposable
   private readonly SqliteConnection _conn;
   public Db(string path)
   {
-    _conn = new SqliteConnection($"Data Source={path}");
+    _conn = new SqliteConnection("Data Source=" + path);
     _conn.Open();
   }
   public SqliteConnection Connection => _conn;
@@ -384,7 +522,7 @@ sealed class Lease : IDisposable
 
   public static async Task<Lease> AcquireAsync(Db db, TimeSpan duration)
   {
-    string owner = $"{Environment.MachineName}:{Environment.ProcessId}";
+    string owner = Environment.MachineName + ":" + Environment.ProcessId;
     while (true)
     {
       using var tx = db.Connection.BeginTransaction();
@@ -433,351 +571,15 @@ ON CONFLICT(id) DO UPDATE SET owner=excluded.owner, expires_at=excluded.expires_
 }
 
 // ----------------------------
-// Graph client (minimal REST)
+// Misc models
 // ----------------------------
-sealed class GraphClient
-{
-  private readonly HttpClient _http;
-  private readonly string _tenantId;
-  private readonly string _clientId;
-  private readonly string _clientSecret;
-  private string? _accessToken;
-  private DateTimeOffset _tokenExpires;
-
-  public GraphClient(HttpClient http, string tenantId, string clientId, string clientSecret)
-  {
-    _http = http; _tenantId = tenantId; _clientId = clientId; _clientSecret = clientSecret;
-  }
-
-  private async Task<string> TokenAsync()
-  {
-    if (_accessToken != null && _tokenExpires > DateTimeOffset.UtcNow.AddMinutes(1))
-      return _accessToken;
-    var content = new FormUrlEncodedContent(new Dictionary<string, string>
-    {
-      ["client_id"] = _clientId,
-      ["client_secret"] = _clientSecret,
-      ["grant_type"] = "client_credentials",
-      ["scope"] = "https://graph.microsoft.com/.default"
-    });
-    using var resp = await _http.PostAsync($"https://login.microsoftonline.com/{_tenantId}/oauth2/v2.0/token", content);
-    resp.EnsureSuccessStatusCode();
-    using var s = await resp.Content.ReadAsStreamAsync();
-    var doc = await JsonDocument.ParseAsync(s);
-    _accessToken = doc.RootElement.GetProperty("access_token").GetString();
-    int expiresIn = doc.RootElement.GetProperty("expires_in").GetInt32();
-    _tokenExpires = DateTimeOffset.UtcNow.AddSeconds(expiresIn);
-    return _accessToken!;
-  }
-
-  private async Task<HttpRequestMessage> CreateRequestAsync(HttpMethod method, string url)
-  {
-    var req = new HttpRequestMessage(method, url);
-    req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await TokenAsync());
-    return req;
-  }
-
-  public async IAsyncEnumerable<DeltaPage> DeltaPagesAsync(string mailbox, string? deltaLink)
-  {
-    string url = deltaLink ?? $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(mailbox)}/mailFolders('Inbox')/messages/delta?$select=id,subject,from,receivedDateTime,hasAttachments,body";
-
-    while (true)
-    {
-      using var req = await CreateRequestAsync(HttpMethod.Get, url);
-      using var resp = await _http.SendAsync(req);
-      resp.EnsureSuccessStatusCode();
-      await using var s = await resp.Content.ReadAsStreamAsync();
-      var doc = await JsonDocument.ParseAsync(s);
-
-      var msgs = new List<GraphMessage>();
-      if (doc.RootElement.TryGetProperty("value", out var arr))
-      {
-        foreach (var el in arr.EnumerateArray())
-        {
-          msgs.Add(GraphMessage.From(el));
-        }
-      }
-
-      string? nextLink = doc.RootElement.TryGetProperty("@odata.nextLink", out var nl) ? nl.GetString() : null;
-      string? delta = doc.RootElement.TryGetProperty("@odata.deltaLink", out var dl) ? dl.GetString() : null;
-
-      yield return new DeltaPage { Messages = msgs, NextLink = nextLink, DeltaLink = delta };
-
-      if (nextLink != null) url = nextLink;
-      else break;
-    }
-  }
-
-  public async Task<List<GraphAttachment>> GetAttachmentsAsync(string mailbox, string messageId)
-  {
-    using var req = await CreateRequestAsync(HttpMethod.Get,
-        $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(mailbox)}/messages/{messageId}/attachments?$select=id,name,contentBytes,@odata.type");
-    using var resp = await _http.SendAsync(req);
-    resp.EnsureSuccessStatusCode();
-    await using var s = await resp.Content.ReadAsStreamAsync();
-    var doc = await JsonDocument.ParseAsync(s);
-    var list = new List<GraphAttachment>();
-    foreach (var el in doc.RootElement.GetProperty("value").EnumerateArray())
-      list.Add(GraphAttachment.From(el));
-    return list;
-  }
-
-  public async Task SendInfoReplyAsync(string mailbox, string messageId, string infoBody, string? subjectSuffix)
-  {
-    // create draft reply
-    using (var req = await CreateRequestAsync(HttpMethod.Post,
-        $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(mailbox)}/messages/{messageId}/createReply"))
-    {
-      req.Content = new StringContent("{}", Encoding.UTF8, "application/json");
-      using var resp = await _http.SendAsync(req);
-      resp.EnsureSuccessStatusCode();
-      await using var s = await resp.Content.ReadAsStreamAsync();
-      var doc = await JsonDocument.ParseAsync(s);
-      var replyId = doc.RootElement.GetProperty("id").GetString()!;
-
-      // set subject/body
-      var patch = new
-      {
-        body = new { contentType = "Text", content = infoBody },
-      };
-      var patchJson = JsonSerializer.Serialize(patch);
-
-      using var req2 = await CreateRequestAsync(HttpMethod.Patch,
-          $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(mailbox)}/messages/{replyId}");
-      req2.Content = new StringContent(patchJson, Encoding.UTF8, "application/json");
-      using var resp2 = await _http.SendAsync(req2);
-      resp2.EnsureSuccessStatusCode();
-
-      if (!string.IsNullOrEmpty(subjectSuffix))
-      {
-        // Get original subject to append (Graph doesn't echo it back reliably here). We'll fetch message to read subject.
-        string subject = await GetMessageSubjectAsync(mailbox, messageId);
-        var patchSub = new { subject = subject + subjectSuffix };
-        using var reqSub = await CreateRequestAsync(HttpMethod.Patch,
-            $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(mailbox)}/messages/{replyId}");
-        reqSub.Content = new StringContent(JsonSerializer.Serialize(patchSub), Encoding.UTF8, "application/json");
-        using var respSub = await _http.SendAsync(reqSub);
-        respSub.EnsureSuccessStatusCode();
-      }
-
-      // send
-      using var req3 = await CreateRequestAsync(HttpMethod.Post,
-          $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(mailbox)}/messages/{replyId}/send");
-      using var resp3 = await _http.SendAsync(req3);
-      resp3.EnsureSuccessStatusCode();
-    }
-  }
-
-  public async Task SendErrorReplyAsync(string mailbox, string messageId, string errorText)
-      => await SendInfoReplyAsync(mailbox, messageId, errorText, null);
-
-  private async Task<string> GetMessageSubjectAsync(string mailbox, string messageId)
-  {
-    using var req = await CreateRequestAsync(HttpMethod.Get,
-        $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(mailbox)}/messages/{messageId}?$select=subject");
-    using var resp = await _http.SendAsync(req);
-    resp.EnsureSuccessStatusCode();
-    await using var s = await resp.Content.ReadAsStreamAsync();
-    var doc = await JsonDocument.ParseAsync(s);
-    return doc.RootElement.GetProperty("subject").GetString() ?? string.Empty;
-  }
-}
-
 sealed class DeltaPage
 {
-  public required List<GraphMessage> Messages { get; init; }
+  public required List<Message> Messages { get; init; }
   public string? NextLink { get; init; }
   public string? DeltaLink { get; init; }
 }
 
-sealed class GraphMessage
-{
-  public required string Id { get; init; }
-  public string? Subject { get; init; }
-  public GraphRecipient? From { get; init; }
-  public DateTimeOffset? ReceivedDateTime { get; init; }
-  public bool? HasAttachments { get; init; }
-  public GraphItemBody? Body { get; init; }
-
-  public static GraphMessage From(JsonElement e)
-  {
-    return new GraphMessage
-    {
-      Id = e.GetProperty("id").GetString()!,
-      Subject = e.TryGetProperty("subject", out var sub) ? sub.GetString() : null,
-      From = e.TryGetProperty("from", out var fr) ? GraphRecipient.From(fr) : null,
-      ReceivedDateTime = e.TryGetProperty("receivedDateTime", out var dt) ? dt.GetDateTimeOffset() : (DateTimeOffset?)null,
-      HasAttachments = e.TryGetProperty("hasAttachments", out var ha) && ha.GetBoolean(),
-      Body = e.TryGetProperty("body", out var b) ? GraphItemBody.From(b) : null
-    };
-  }
-}
-
-sealed class GraphItemBody
-{
-  public string? ContentType { get; init; }
-  public string? Content { get; init; }
-  public static GraphItemBody From(JsonElement e) => new()
-  {
-    ContentType = e.TryGetProperty("contentType", out var t) ? t.GetString() : null,
-    Content = e.TryGetProperty("content", out var c) ? c.GetString() : null
-  };
-}
-
-sealed class GraphRecipient
-{
-  public GraphEmailAddress? EmailAddress { get; init; }
-  public static GraphRecipient From(JsonElement e) => new()
-  {
-    EmailAddress = e.TryGetProperty("emailAddress", out var ea) ? GraphEmailAddress.From(ea) : null
-  };
-}
-
-sealed class GraphEmailAddress
-{
-  public string? Name { get; init; }
-  public string? Address { get; init; }
-  public static GraphEmailAddress From(JsonElement e) => new()
-  {
-    Name = e.TryGetProperty("name", out var n) ? n.GetString() : null,
-    Address = e.TryGetProperty("address", out var a) ? a.GetString() : null
-  };
-}
-
-sealed class GraphAttachment
-{
-  public string? Id { get; init; }
-  public string? Name { get; init; }
-  public string? ContentBytes { get; init; }
-  public string? ODataType { get; init; }
-
-  public static GraphAttachment From(JsonElement e) => new()
-  {
-    Id = e.TryGetProperty("id", out var id) ? id.GetString() : null,
-    Name = e.TryGetProperty("name", out var n) ? n.GetString() : null,
-    ContentBytes = e.TryGetProperty("contentBytes", out var cb) ? cb.GetString() : null,
-    ODataType = e.TryGetProperty("@odata.type", out var od) ? od.GetString() : null
-  };
-}
-
-// ----------------------------
-// TFS client (on‑prem REST)
-// ----------------------------
-sealed class TfsClient
-{
-  private readonly HttpClient _http;
-  private readonly string _base;
-  private readonly string _api;
-  private readonly string _pat;
-  private readonly string _authHeader;
-
-  public TfsClient(HttpClient http, string baseUrl, string apiVersion, string pat)
-  {
-    _http = http; _base = baseUrl; _api = apiVersion; _pat = pat;
-    _authHeader = Convert.ToBase64String(Encoding.ASCII.GetBytes($":{_pat}"));
-  }
-
-  private HttpRequestMessage Req(HttpMethod method, string path)
-  {
-    var req = new HttpRequestMessage(method, path);
-    req.Headers.Authorization = new AuthenticationHeaderValue("Basic", _authHeader);
-    return req;
-  }
-
-  public async Task<bool> WorkItemExistsAsync(int id)
-  {
-    using var req = Req(HttpMethod.Get, $"{_base}/_apis/wit/workitems/{id}?api-version={_api}");
-    using var resp = await _http.SendAsync(req);
-    if (resp.StatusCode == System.Net.HttpStatusCode.NotFound) return false;
-    resp.EnsureSuccessStatusCode();
-    return true;
-  }
-
-  public async Task<int> CreateUserStoryAsync(string project, string title, string descriptionMarkdown)
-  {
-    var ops = new List<object>
-        {
-            new { op = "add", path = "/fields/System.Title", value = title },
-            new { op = "add", path = "/fields/System.Description", value = MarkdownAsHtml(descriptionMarkdown) }
-        };
-    var json = JsonSerializer.Serialize(ops);
-
-    using var req = Req(new HttpMethod("PATCH"), $"{_base}/{Uri.EscapeDataString(project)}/_apis/wit/workitems/$User%20Story?api-version={_api}");
-    req.Content = new StringContent(json, Encoding.UTF8, "application/json-patch+json");
-    using var resp = await _http.SendAsync(req);
-    resp.EnsureSuccessStatusCode();
-    await using var s = await resp.Content.ReadAsStreamAsync();
-    var doc = await JsonDocument.ParseAsync(s);
-    return doc.RootElement.GetProperty("id").GetInt32();
-  }
-
-  public async Task AddCommentAndAttachmentsAsync(int workItemId, string commentMarkdown, List<AttachmentPayload> attachments)
-  {
-    var ops = new List<object>
-        {
-            new { op = "add", path = "/fields/System.History", value = MarkdownAsHtml(commentMarkdown) }
-        };
-
-    if (attachments.Count > 0)
-    {
-      foreach (var a in attachments)
-      {
-        var url = await UploadAttachmentAsync(a.FileName, a.Bytes);
-        ops.Add(new
-        {
-          op = "add",
-          path = "/relations/-",
-          value = new { rel = "AttachedFile", url }
-        });
-      }
-    }
-
-    var json = JsonSerializer.Serialize(ops);
-    using var req = Req(new HttpMethod("PATCH"), $"{_base}/_apis/wit/workitems/{workItemId}?api-version={_api}");
-    req.Content = new StringContent(json, Encoding.UTF8, "application/json-patch+json");
-    using var resp = await _http.SendAsync(req);
-    resp.EnsureSuccessStatusCode();
-  }
-
-  public async Task AddAttachmentsAsync(int workItemId, List<AttachmentPayload> attachments)
-  {
-    if (attachments.Count == 0) return;
-    var ops = new List<object>();
-    foreach (var a in attachments)
-    {
-      var url = await UploadAttachmentAsync(a.FileName, a.Bytes);
-      ops.Add(new { op = "add", path = "/relations/-", value = new { rel = "AttachedFile", url } });
-    }
-    var json = JsonSerializer.Serialize(ops);
-    using var req = Req(new HttpMethod("PATCH"), $"{_base}/_apis/wit/workitems/{workItemId}?api-version={_api}");
-    req.Content = new StringContent(json, Encoding.UTF8, "application/json-patch+json");
-    using var resp = await _http.SendAsync(req);
-    resp.EnsureSuccessStatusCode();
-  }
-
-  private async Task<string> UploadAttachmentAsync(string fileName, byte[] bytes)
-  {
-    using var req = Req(HttpMethod.Post, $"{_base}/_apis/wit/attachments?fileName={Uri.EscapeDataString(fileName)}&api-version={_api}");
-    req.Content = new ByteArrayContent(bytes);
-    req.Content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
-    using var resp = await _http.SendAsync(req);
-    resp.EnsureSuccessStatusCode();
-    await using var s = await resp.Content.ReadAsStreamAsync();
-    var doc = await JsonDocument.ParseAsync(s);
-    return doc.RootElement.GetProperty("url").GetString()!;
-  }
-
-  private static string MarkdownAsHtml(string md)
-  {
-    // TFS accepts HTML in System.Description/System.History. Minimal wrapping.
-    string escaped = System.Net.WebUtility.HtmlEncode(md).Replace("\n", "<br/>");
-    return $"<div>{escaped}</div>";
-  }
-}
-
-// ----------------------------
-// Misc models
-// ----------------------------
 sealed class AttachmentPayload
 {
   public required string FileName { get; init; }
