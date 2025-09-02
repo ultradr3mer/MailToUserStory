@@ -131,7 +131,7 @@ async Task<bool> ProcessMessage(string mailbox, Microsoft.Graph.Models.Message m
       // ----------------------------
       // Update existing user story
       // ----------------------------
-      Console.WriteLine($"Updating existing User Story #{existingId} for message {msg.Id}");
+      Console.WriteLine($"Updating existing User Story #{existingId}");
 
       if (!await TfsConnector.WorkItemExistsAsync(wit, existingId))
       {
@@ -147,7 +147,7 @@ async Task<bool> ProcessMessage(string mailbox, Microsoft.Graph.Models.Message m
         wit,
         app.Tfs.Project,
         existingId,
-        prepared.markdown,
+        prepared.html,
         prepared.attachments
       );
 
@@ -170,14 +170,20 @@ async Task<bool> ProcessMessage(string mailbox, Microsoft.Graph.Models.Message m
         wit,
         app.Tfs.Project,
         msg.Subject ?? "(no subject)",
-        prepared.markdown
+        "This UserStory was generated form an E-Mail, see History"
       );
 
-      if (prepared.attachments.Count > 0)
-      {
-        await TfsConnector.AddAttachmentsAsync(wit, app.Tfs.Project, newId, prepared.attachments);
-        Console.WriteLine($"Uploaded {prepared.attachments.Count} attachments to User Story #{newId}");
-      }
+      Console.WriteLine($"Created User Story #{newId}");
+
+      await TfsConnector.AddCommentAndAttachmentsAsync(
+        wit,
+        app.Tfs.Project,
+        newId,
+        prepared.html,
+        prepared.attachments
+      );
+
+      Console.WriteLine($"Updated User Story #{newId} with new comment/attachments.");
 
       db.LinkStory(mailbox, newId);
 
