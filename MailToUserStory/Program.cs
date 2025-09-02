@@ -5,20 +5,6 @@
 // - TFS (on-prem): create/update User Story, add comments, upload attachments
 // - SQLite: delta tokens + processed message ids + lease
 //
-// Quick start
-//   dotnet new console -n GraphToTfsUserStories -f net8.0
-//   dotnet add package Microsoft.Graph
-//   dotnet add package Azure.Identity
-//   dotnet add package Microsoft.Data.Sqlite
-//   dotnet add package Microsoft.Extensions.Configuration
-//   dotnet add package Microsoft.Extensions.Configuration.Json
-//   dotnet add package Microsoft.Extensions.Configuration.UserSecrets
-//   dotnet add package Microsoft.Extensions.Configuration.Binder
-//   dotnet add package HtmlAgilityPack
-//   dotnet add package ReverseMarkdown
-//   dotnet add package Microsoft.TeamFoundationServer.Client
-//   dotnet add package Microsoft.VisualStudio.Services.Client
-//
 // appsettings.json (example)
 // {
 //   "Project": "ContosoProject",
@@ -35,43 +21,25 @@
 //   "Polling": { "Minutes": 5 },
 //   "DatabasePath": "stories.db"
 // }
+//
 // user-secrets:
 //   dotnet user-secrets set "Graph:ClientSecret" "<client-secret>"
 //   dotnet user-secrets set "Tfs:Pat" "<tfs-pat>"
 
 using Azure.Identity;
-using HtmlAgilityPack;
 using MailToUserStory;
-using MailToUserStory.Data;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Graph;
-using Microsoft.Graph.Models;
-using Microsoft.Graph.Users.Item.MailFolders.Item.Messages.Delta;
 using Microsoft.TeamFoundation.WorkItemTracking.WebApi;
-using Microsoft.TeamFoundation.WorkItemTracking.WebApi.Models;
-using Microsoft.VisualBasic;
 using Microsoft.VisualStudio.Services.Common;
 using Microsoft.VisualStudio.Services.WebApi;
-using Microsoft.VisualStudio.Services.WebApi.Patch.Json;
-using System.Net;
-using System.Net.Mail;
-using System.Text;
-using System.Text.RegularExpressions;
-using System.Xml;
 
 // ----------------------------
-// Configuration models
-// ----------------------------
-
-
-
-
-
-// ----------------------------
-// Bootstrapping
+// Programm
 // ----------------------------
 var config = new ConfigurationBuilder()
     .AddJsonFile("appsettings.json", optional: false)
+    .AddJsonFile("appsettings.local.json", optional: true)
     .AddUserSecrets(typeof(AppConfig).Assembly, optional: true)
     //.AddEnvironmentVariables()
     .Build();
@@ -166,79 +134,4 @@ foreach (var mailbox in app.Graph.Mailboxes)
 
 Console.WriteLine("Done.");
 return;
-
-// ----------------------------
-// TFS helpers (WorkItemTrackingHttpClient)
-// ----------------------------
-
-
-// ----------------------------
-// Glue: content prep + parsing
-// ----------------------------
-
-
-
-
-// ----------------------------
-// Single-instance lease
-// ----------------------------
-sealed class Lease : IDisposable
-{
-  private readonly Db _db;
-  private bool _released;
-  private Lease(Db db) { _db = db; }
-
-  public static async Task<Lease> AcquireAsync(Db db, TimeSpan duration)
-  {
-    string owner = Environment.MachineName + ":" + Environment.ProcessId;
-    while (true)
-    {
-      using var tx = db.Connection.BeginTransaction();
-      using var cmdSel = db.Connection.CreateCommand();
-      cmdSel.Transaction = tx;
-      cmdSel.CommandText = "SELECT owner, expires_at FROM Lease WHERE id=1";
-      using var r = cmdSel.ExecuteReader();
-      string? curOwner = null; DateTimeOffset? expires = null;
-      if (r.Read())
-      {
-        curOwner = r.IsDBNull(0) ? null : r.GetString(0);
-        expires = r.IsDBNull(1) ? null : DateTimeOffset.Parse(r.GetString(1));
-      }
-      r.Close();
-
-      bool canTake = curOwner == null || expires == null || expires < DateTimeOffset.UtcNow;
-      using var cmd = db.Connection.CreateCommand();
-      cmd.Transaction = tx;
-      if (canTake)
-      {
-        cmd.CommandText = @"
-INSERT INTO Lease(id, owner, expires_at) VALUES(1, @o, @e)
-ON CONFLICT(id) DO UPDATE SET owner=excluded.owner, expires_at=excluded.expires_at";
-        cmd.Parameters.AddWithValue("@o", owner);
-        cmd.Parameters.AddWithValue("@e", DateTimeOffset.UtcNow.Add(duration).ToString("O"));
-        cmd.ExecuteNonQuery();
-        tx.Commit();
-        return new Lease(db);
-      }
-      tx.Rollback();
-      await Task.Delay(1000);
-    }
-  }
-
-  public void Dispose()
-  {
-    if (_released) return;
-    using var tx = _db.Connection.BeginTransaction();
-    using var cmd = _db.Connection.CreateCommand();
-    cmd.Transaction = tx;
-    cmd.CommandText = "UPDATE Lease SET owner=NULL, expires_at=NULL WHERE id=1";
-    cmd.ExecuteNonQuery();
-    tx.Commit();
-    _released = true;
-  }
-}
-
-// ----------------------------
-// Misc models
-// ----------------------------
 
