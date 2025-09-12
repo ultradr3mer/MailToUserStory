@@ -68,19 +68,19 @@ var mdConverter = new ReverseMarkdown.Converter(new ReverseMarkdown.Config
 foreach (var mailbox in app.Graph.Mailboxes)
 {
   Console.WriteLine($"=== Processing mailbox: {mailbox} ===");
-  string? deltaLink = db.GetDeltaLink(mailbox);
 
   // Iterate all delta pages (new + changed messages)
+  string? deltaLink = db.GetDeltaLink(mailbox);
   await foreach (var page in GraphConnector.DeltaPagesAsync(graph, mailbox, deltaLink))
   {
-    Console.WriteLine($"Received {page.Messages.Count} messages from delta query for {mailbox}");
+    Console.WriteLine($"Received {page.Messages.Count} incomming messages from delta query for {mailbox}");
 
     int nr = 1;
     foreach (var msg in page.Messages)
     {
       Console.WriteLine($"--> Message {nr++} with Subject: {msg.Subject}");
 
-      bool flowControl = await ProcessMessage(mailbox, msg);
+      bool flowControl = await ProcessIncommingMessage(mailbox, msg);
 
       if (!flowControl)
       {
@@ -97,6 +97,36 @@ foreach (var mailbox in app.Graph.Mailboxes)
       Console.WriteLine($"Updated delta link for {mailbox}");
     }
   }
+
+  // For sent messages
+  var sentMailbox = GraphConnector.GetSentMailbox(mailbox);
+  string? sentDeltaLink = db.GetDeltaLink(sentMailbox);
+  await foreach (var page in GraphConnector.DeltaPagesAsync(graph, sentMailbox, sentDeltaLink))
+  {
+    Console.WriteLine($"Received {page.Messages.Count} outgoing messages from delta query for {sentMailbox}");
+
+    int nr = 1;
+    foreach (var msg in page.Messages)
+    {
+      Console.WriteLine($"--> Message {nr++} with Subject: {msg.Subject}");
+
+      bool flowControl = await ProcessSentMessage(sentMailbox, msg);
+
+      if (!flowControl)
+      {
+        Console.WriteLine($"Skipped message");
+        continue;
+      }
+    }
+
+    // Store new delta token for next run
+    if (!string.IsNullOrEmpty(page.DeltaLink))
+    {
+      sentDeltaLink = page.DeltaLink;
+      db.UpsertDeltaLink(sentMailbox, sentDeltaLink);
+      Console.WriteLine($"Updated delta link for {sentMailbox}");
+    }
+  }
 }
 
 Console.WriteLine("All mailboxes processed. Done.");
@@ -105,7 +135,7 @@ return;
 // ----------------------------
 // Process a single email
 // ----------------------------
-async Task<bool> ProcessMessage(string mailbox, Microsoft.Graph.Models.Message msg)
+async Task<bool> ProcessIncommingMessage(string mailbox, Microsoft.Graph.Models.Message msg)
 {
   // Skip if we already processed this message
   if (db.WasProcessed(msg.Id!))
@@ -192,8 +222,67 @@ async Task<bool> ProcessMessage(string mailbox, Microsoft.Graph.Models.Message m
         subjectSuffix: $" [US#{newId}]"
       );
 
-      Console.WriteLine($"Created User Story #{newId} for message");
       db.MarkProcessed(msg.Id!, mailbox, newId, "created");
+    }
+  }
+  catch (Exception ex)
+  {
+    Console.Error.WriteLine($"Error processing message: {ex}");
+    throw; // per requirement: crash and let supervisor retry
+  }
+
+  return true;
+}
+
+
+// ----------------------------
+// Process a single outgoing email
+// ----------------------------
+async Task<bool> ProcessSentMessage(string mailbox, Microsoft.Graph.Models.Message msg)
+{
+  // Skip if we already processed this message
+  if (db.WasProcessed(msg.Id!))
+  {
+    Console.WriteLine($"Message already processed, skipping.");
+    return false;
+  }
+
+  // Try to extract User Story ID from subject
+  int? usId = Util.ParseUserStoryId(msg.Subject);
+
+  try
+  {
+    if (usId is int existingId)
+    {
+      // ----------------------------
+      // Update existing user story
+      // ----------------------------
+      Console.WriteLine($"Updating existing User Story #{existingId}");
+
+      if (!await TfsConnector.WorkItemExistsAsync(wit, existingId))
+      {
+        db.MarkProcessed(msg.Id!, mailbox, null, "us-not-found");
+        return false;
+      }
+
+      var prepared = await Util.PrepareContentAsync(graph, mailbox, msg, mdConverter);
+
+      await TfsConnector.AddCommentAndAttachmentsAsync(
+        wit,
+        app.Tfs.Project,
+        existingId,
+        prepared.html,
+        prepared.attachments
+      );
+
+      Console.WriteLine($"Updated User Story #{existingId} with new comment/attachments.");
+      db.MarkProcessed(msg.Id!, mailbox, existingId, "updated");
+    }
+    else
+    {
+      Console.WriteLine($"Sent mail withoutUser Story reference is ignored.");
+
+      db.MarkProcessed(msg.Id!, mailbox, null, "ignored");
     }
   }
   catch (Exception ex)

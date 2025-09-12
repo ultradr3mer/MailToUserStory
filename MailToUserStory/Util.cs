@@ -2,7 +2,6 @@
 using MailToUserStory.Data;
 using Microsoft.Graph;
 using Microsoft.Graph.Models;
-using System.Text;
 using System.Text.RegularExpressions;
 
 namespace MailToUserStory
@@ -25,13 +24,19 @@ namespace MailToUserStory
 
       string html = SanitizeHtml(msg.Body, converter, container.InlineAttachments);
 
-      var meta = new StringBuilder();
-      meta.AppendLine();
-      meta.AppendLine("---");
-      meta.AppendLine("> From: " + msg.From?.EmailAddress?.Name + " <" + msg.From?.EmailAddress?.Address + ">");
-      meta.AppendLine("> Received: " + (msg.ReceivedDateTime.HasValue ? msg.ReceivedDateTime.Value.ToString("O") : ""));
+      var meta = new List<string>
+      {
+        string.Empty,
+        "---",
+        "> From: " + msg.From?.EmailAddress?.Name + " <" + msg.From?.EmailAddress?.Address + ">"
+      };
 
-      return (html + "\n\n" + meta.ToString(), attachments);
+      if(msg.ToRecipients != null)
+        meta.Add("> To: " + string.Join(";", msg.ToRecipients.Select(r => r.EmailAddress?.Name + " <" + r.EmailAddress?.Address + ">")));
+
+      meta.Add("> On: " + (msg.ReceivedDateTime.HasValue ? msg.ReceivedDateTime.Value.ToString("O") : ""));
+
+      return (html + string.Join("\n\n<br>",meta), attachments);
     }
 
     public static string SanitizeHtml(ItemBody? body, ReverseMarkdown.Converter converter, List<FileAttachment> inlineAttachments)

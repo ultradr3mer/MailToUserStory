@@ -10,6 +10,7 @@ namespace MailToUserStory
   public static class GraphConnector
   {
     private const string InboxWellKnownFolderName = "Inbox";
+    private const string SentItemsWellKnownFolderName = "SentItems";
 
     public static async IAsyncEnumerable<DeltaPage> DeltaPagesAsync(GraphServiceClient graph, string mailbox, string? deltaLink)
     {
@@ -34,7 +35,7 @@ namespace MailToUserStory
           .MailFolders[folderId].Messages.Delta
           .GetAsDeltaGetResponseAsync(r =>
           {
-            r.QueryParameters.Select = new[] { "id", "subject", "from", "receivedDateTime", "hasAttachments", "body" };
+            r.QueryParameters.Select = new[] { "id", "subject", "from", "toRecipients", "receivedDateTime", "hasAttachments", "body" };
           });
       }
 
@@ -65,8 +66,8 @@ namespace MailToUserStory
 
     private static async Task<string?> ResolveFolderIdAsync(GraphServiceClient graph, string user, string folderName)
     {
-      if (folderName == InboxWellKnownFolderName)
-        return InboxWellKnownFolderName;
+      if (folderName == InboxWellKnownFolderName || folderName == SentItemsWellKnownFolderName)
+        return folderName;
 
       var folders = await graph.Users[user].MailFolders.GetAsync();
       var folder = folders?.Value?.FirstOrDefault(f =>
@@ -124,6 +125,11 @@ namespace MailToUserStory
 
     public static Task SendErrorReplyAsync(GraphServiceClient graph, string mailbox, Message original, string errorText)
           => SendInfoReplyAsync(graph, mailbox, original, errorText, null);
+
+    internal static string GetSentMailbox(string mailbox)
+    {
+      return new GraphUserFolder(mailbox).User + "/" + SentItemsWellKnownFolderName;
+    }
 
     private class GraphUserFolder
     {
