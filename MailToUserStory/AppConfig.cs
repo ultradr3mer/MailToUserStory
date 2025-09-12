@@ -1,16 +1,11 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-
-namespace MailToUserStory
+﻿namespace MailToUserStory
 {
   public record AppConfig
   {
     public required GraphConfig Graph { get; init; }
     public required TfsConfig Tfs { get; init; }
     public string DatabasePath { get; init; } = "stories.db";
+    public required OllamaConfig Ollama { get; init; }
 
     public record GraphConfig
     {
@@ -27,6 +22,14 @@ namespace MailToUserStory
       public required string Project { get; init; }
       public string? User { get; init; }
       public string Password { get; init; }
+    }
+
+    public record OllamaConfig
+    {
+      public string Host { get; init; } = "http://localhost:11434";
+      public string Model { get; init; } = "gpt-oss:20b";
+      public string SummarizeInstruction { get; init; } = string.Empty;
+      public bool Enabled { get; init; } = false;
     }
   }
 }

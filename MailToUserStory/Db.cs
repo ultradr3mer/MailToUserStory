@@ -45,19 +45,20 @@ ON CONFLICT(address) DO UPDATE SET delta_link=excluded.delta_link";
     return r.Read();
   }
 
-  public void MarkProcessed(string messageId, string mailbox, int? workItemId, string outcome)
+  public void MarkProcessed(string messageId, string mailbox, int? workItemId, string outcome, string content = "")
   {
     using var tx = _conn.BeginTransaction();
     using var cmd = _conn.CreateCommand();
     cmd.Transaction = tx;
     cmd.CommandText = @"
-INSERT INTO ProcessedEmails(graph_message_id, mailbox, work_item_id, processed_at, outcome)
-VALUES(@id, @mb, @wi, @ts, @out)";
+INSERT INTO ProcessedEmails(graph_message_id, mailbox, work_item_id, processed_at, outcome, content)
+VALUES(@id, @mb, @wi, @ts, @out, @content)";
     cmd.Parameters.AddWithValue("@id", messageId);
     cmd.Parameters.AddWithValue("@mb", mailbox);
     cmd.Parameters.AddWithValue("@wi", (object?)workItemId ?? DBNull.Value);
     cmd.Parameters.AddWithValue("@ts", DateTimeOffset.UtcNow.ToString("O"));
     cmd.Parameters.AddWithValue("@out", outcome);
+    cmd.Parameters.AddWithValue("@content", content);
     cmd.ExecuteNonQuery();
     tx.Commit();
   }
@@ -73,6 +74,23 @@ INSERT OR IGNORE INTO Stories(work_item_id, mailbox) VALUES(@wi, @mb)";
     cmd.Parameters.AddWithValue("@mb", mailbox);
     cmd.ExecuteNonQuery();
     tx.Commit();
+  }
+
+  public List<string> GetStoryContent(int id)
+  {
+    var results = new List<string>();
+    using var cmd = _conn.CreateCommand();
+    cmd.CommandText = "SELECT content FROM ProcessedEmails WHERE work_item_id=@id";
+    cmd.Parameters.AddWithValue("@id", id);
+
+    using var reader = cmd.ExecuteReader();
+    while (reader.Read())
+    {
+      if (reader["content"] is string content && !string.IsNullOrEmpty(content))
+        results.Add(content);
+    }
+
+    return results;
   }
 
   public static void InitializeSchema(Db db)
@@ -91,10 +109,11 @@ CREATE TABLE IF NOT EXISTS Stories(
 CREATE TABLE IF NOT EXISTS ProcessedEmails(
   graph_message_id TEXT PRIMARY KEY,
   mailbox TEXT NOT NULL,
+  content TEXT NOT NULL,
   work_item_id INTEGER NULL,
   processed_at TEXT NOT NULL,
   outcome TEXT NOT NULL
-);
+)
 ";
     cmd.ExecuteNonQuery();
   }

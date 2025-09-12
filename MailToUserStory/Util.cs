@@ -2,6 +2,7 @@
 using MailToUserStory.Data;
 using Microsoft.Graph;
 using Microsoft.Graph.Models;
+using System.Net;
 using System.Text.RegularExpressions;
 
 namespace MailToUserStory
@@ -22,24 +23,25 @@ namespace MailToUserStory
         });
       }
 
-      string html = SanitizeHtml(msg.Body, converter, container.InlineAttachments);
+      string message = SanitizeHtmlForHistory(msg.Body, converter, container.InlineAttachments);
 
-      var meta = new List<string>
-      {
-        string.Empty,
-        "---",
-        "> From: " + msg.From?.EmailAddress?.Name + " <" + msg.From?.EmailAddress?.Address + ">"
-      };
+      var html = new List<string>();
+      html.Add("Von: " + msg.From?.EmailAddress?.Name + " <" + msg.From?.EmailAddress?.Address + ">");
 
       if(msg.ToRecipients != null)
-        meta.Add("> To: " + string.Join(";", msg.ToRecipients.Select(r => r.EmailAddress?.Name + " <" + r.EmailAddress?.Address + ">")));
+        html.Add("An: " + string.Join(";", msg.ToRecipients.Select(r => r.EmailAddress?.Name + " <" + r.EmailAddress?.Address + ">")));
 
-      meta.Add("> On: " + (msg.ReceivedDateTime.HasValue ? msg.ReceivedDateTime.Value.ToString("O") : ""));
+      if (msg.Subject != null)
+        html.Add("Betreff: " + msg.Subject);
 
-      return (html + string.Join("\n\n<br>",meta), attachments);
+      html.Add("Gesendet: " + (msg.ReceivedDateTime.HasValue ? msg.ReceivedDateTime.Value.ToString("O") : "")
+            +message);
+
+
+      return (string.Join("<br>\r\n", html), attachments);
     }
 
-    public static string SanitizeHtml(ItemBody? body, ReverseMarkdown.Converter converter, List<FileAttachment> inlineAttachments)
+    public static string SanitizeHtmlForHistory(ItemBody? body, ReverseMarkdown.Converter converter, List<FileAttachment> inlineAttachments)
     {
       if (body == null) return "(no content)";
       if (body.ContentType == BodyType.Text) return string.IsNullOrWhiteSpace(body.Content) ? "(no content)" : body.Content!.Trim();
@@ -77,6 +79,24 @@ namespace MailToUserStory
       foreach (var n in doc.DocumentNode.SelectNodes("//script|//style") ?? new HtmlNodeCollection(doc.DocumentNode)) n.Remove();
       string sanitized = doc.DocumentNode.InnerHtml;
       return sanitized;
+    }
+
+    public static string SanitizeHtmlForLlm(string html)
+    {
+      HtmlDocument doc = new HtmlDocument();
+      doc.LoadHtml(html);
+
+      // Ersetze <br>, <hr> explizit durch Zeilenumbrüche
+      foreach (var br in doc.DocumentNode.SelectNodes("//br|//hr") ?? Enumerable.Empty<HtmlNode>())
+        br.ParentNode.ReplaceChild(doc.CreateTextNode("\n"), br);
+
+      // Plaintext extrahieren
+      string plain = WebUtility.HtmlDecode(doc.DocumentNode.InnerText);
+
+      // Aufräumen: mehrfach \r\n oder \n zu einfachem Zeilenumbruch, trimmen
+      plain = Regex.Replace(plain, @"(\r?\n)\s*(\r?\n)", "\r\n").Trim();
+
+      return plain;
     }
 
     private static byte[] ReEncode(byte[] bytes)

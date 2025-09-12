@@ -55,6 +55,12 @@ var tfsUri = new Uri(app.Tfs.BaseUrl);
 var connection = new VssConnection(tfsUri, new VssBasicCredential(app.Tfs.User, app.Tfs.Password));
 var wit = await connection.GetClientAsync<WorkItemTrackingHttpClient>();
 
+// Create Ollama client
+var ollama = new OllamaClient(app.Ollama.Host, app.Ollama.Model, app.Ollama.SummarizeInstruction);
+
+// Initilize Summary Generator
+var summaryGenerator = new SummaryGenerator(ollama, app.Ollama.Enabled);
+
 // Markdown converter (for logs/debugging, not persisted to TFS)
 var mdConverter = new ReverseMarkdown.Converter(new ReverseMarkdown.Config
 {
@@ -163,7 +169,8 @@ async Task<bool> ProcessIncommingMessage(string mailbox, Microsoft.Graph.Models.
       // ----------------------------
       Console.WriteLine($"Updating existing User Story #{existingId}");
 
-      if (!await TfsConnector.WorkItemExistsAsync(wit, existingId))
+      string? description = await TfsConnector.WorkItemExistsingDescriptionAsync(wit, existingId);
+      if (description == null)
       {
         Console.WriteLine($"User Story #{existingId} not found in TFS. Sending error reply.");
         await GraphConnector.SendErrorReplyAsync(graph, mailbox, msg, $"User Story #{existingId} was not found in TFS.");
@@ -173,19 +180,25 @@ async Task<bool> ProcessIncommingMessage(string mailbox, Microsoft.Graph.Models.
 
       var prepared = await Util.PrepareContentAsync(graph, mailbox, msg, mdConverter);
 
+      List<string> history = db.GetStoryContent(existingId);
+      history.Add(prepared.html);
+
+      var newDesc = await summaryGenerator.Summarize(description, history);
+
       await TfsConnector.AddCommentAndAttachmentsAsync(
         wit,
         app.Tfs.Project,
         existingId,
         prepared.html,
-        prepared.attachments
+        prepared.attachments,
+        newDesc
       );
 
       await GraphConnector.SendInfoReplyAsync(graph, mailbox, msg,
         $"User Story [US#{existingId}] was updated.", null);
 
       Console.WriteLine($"Updated User Story #{existingId} with new comment/attachments.");
-      db.MarkProcessed(msg.Id!, mailbox, existingId, "updated");
+      db.MarkProcessed(msg.Id!, mailbox, existingId, "updated", prepared.html);
     }
     else
     {
@@ -196,14 +209,21 @@ async Task<bool> ProcessIncommingMessage(string mailbox, Microsoft.Graph.Models.
 
       var prepared = await Util.PrepareContentAsync(graph, mailbox, msg, mdConverter);
 
+      string description = "This UserStory was generated form an E-Mail, see History";
+
+      var history = new List<string> { prepared.html };
+
+      var newDesc = await summaryGenerator.Summarize(description, history);
+
       int newId = await TfsConnector.CreateUserStoryAsync(
         wit,
         app.Tfs.Project,
         msg.Subject ?? "(no subject)",
-        "This UserStory was generated form an E-Mail, see History"
+        newDesc
       );
 
       Console.WriteLine($"Created User Story #{newId}");
+
 
       await TfsConnector.AddCommentAndAttachmentsAsync(
         wit,
@@ -222,7 +242,7 @@ async Task<bool> ProcessIncommingMessage(string mailbox, Microsoft.Graph.Models.
         subjectSuffix: $" [US#{newId}]"
       );
 
-      db.MarkProcessed(msg.Id!, mailbox, newId, "created");
+      db.MarkProcessed(msg.Id!, mailbox, newId, "created", prepared.html);
     }
   }
   catch (Exception ex)
@@ -259,7 +279,8 @@ async Task<bool> ProcessSentMessage(string mailbox, Microsoft.Graph.Models.Messa
       // ----------------------------
       Console.WriteLine($"Updating existing User Story #{existingId}");
 
-      if (!await TfsConnector.WorkItemExistsAsync(wit, existingId))
+      string? description = await TfsConnector.WorkItemExistsingDescriptionAsync(wit, existingId);
+      if (description == null)
       {
         db.MarkProcessed(msg.Id!, mailbox, null, "us-not-found");
         return false;
@@ -267,16 +288,22 @@ async Task<bool> ProcessSentMessage(string mailbox, Microsoft.Graph.Models.Messa
 
       var prepared = await Util.PrepareContentAsync(graph, mailbox, msg, mdConverter);
 
+      List<string> history = db.GetStoryContent(existingId);
+      history.Add(prepared.html);
+
+      var newDesc = await summaryGenerator.Summarize(description, history);
+
       await TfsConnector.AddCommentAndAttachmentsAsync(
         wit,
         app.Tfs.Project,
         existingId,
         prepared.html,
-        prepared.attachments
+        prepared.attachments,
+        newDesc
       );
 
       Console.WriteLine($"Updated User Story #{existingId} with new comment/attachments.");
-      db.MarkProcessed(msg.Id!, mailbox, existingId, "updated");
+      db.MarkProcessed(msg.Id!, mailbox, existingId, "updated", prepared.html);
     }
     else
     {

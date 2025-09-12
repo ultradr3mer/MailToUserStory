@@ -2,42 +2,68 @@
 using Microsoft.TeamFoundation.WorkItemTracking.WebApi;
 using Microsoft.TeamFoundation.WorkItemTracking.WebApi.Models;
 using Microsoft.VisualStudio.Services.WebApi.Patch.Json;
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Net;
-using System.Text;
-using System.Threading.Tasks;
 using Microsoft.VisualStudio.Services.WebApi.Patch;
 
 namespace MailToUserStory
 {
   public static class TfsConnector
   {
-    public static async Task<bool> WorkItemExistsAsync(WorkItemTrackingHttpClient wit, int id)
+    public static async Task<string?> WorkItemExistsingDescriptionAsync(
+        WorkItemTrackingHttpClient wit,
+        int id)
     {
-      try { _ = await wit.GetWorkItemAsync(id); return true; }
-      //catch (Microsoft.VisualStudio.Services.WebApi.VssServiceException ex) when (ex.Message.Contains("404")) { return false; }
-      catch (Microsoft.VisualStudio.Services.WebApi.VssServiceResponseException ex) when (ex.HttpStatusCode == HttpStatusCode.NotFound) { return false; }
+      try
+      {
+        var wi = await wit.GetWorkItemAsync(id, expand: WorkItemExpand.Fields);
+        wi.Fields.TryGetValue("System.Description", out var desc);
+        return desc as string ?? string.Empty;
+      }
+      catch (Microsoft.VisualStudio.Services.WebApi.VssServiceResponseException ex)
+          when (ex.HttpStatusCode == HttpStatusCode.NotFound)
+      {
+        return null;
+      }
     }
 
     public static async Task<int> CreateUserStoryAsync(WorkItemTrackingHttpClient wit, string project, string title, string descriptionMarkdown)
     {
       var patch = new JsonPatchDocument
-    {
+      {
         new JsonPatchOperation { Operation = Operation.Add, Path = "/fields/System.Title", Value = title },
         new JsonPatchOperation { Operation = Operation.Add, Path = "/fields/System.Description", Value = descriptionMarkdown }
-    };
+      };
       var wi = await wit.CreateWorkItemAsync(patch, project, "User Story");
       return wi.Id ?? throw new Exception("No ID returned from CreateWorkItemAsync");
     }
 
-    public static async Task AddCommentAndAttachmentsAsync(WorkItemTrackingHttpClient wit, string project, int id, string commentMarkdown, List<AttachmentPayload> attachments)
+    public static async Task AddCommentAndAttachmentsAsync(
+        WorkItemTrackingHttpClient wit,
+        string project,
+        int id,
+        string commentMarkdown,
+        List<AttachmentPayload> attachments,
+        string? updatedDescription = null)
     {
       var patch = new JsonPatchDocument
     {
-        new JsonPatchOperation { Operation = Operation.Add, Path = "/fields/System.History", Value = commentMarkdown }
+        new JsonPatchOperation
+        {
+            Operation = Operation.Add,
+            Path = "/fields/System.History",
+            Value = commentMarkdown
+        }
     };
+
+      if (!string.IsNullOrEmpty(updatedDescription))
+      {
+        patch.Add(new JsonPatchOperation
+        {
+          Operation = Operation.Replace, 
+          Path = "/fields/System.Description",
+          Value = updatedDescription
+        });
+      }
 
       foreach (var a in attachments)
       {
