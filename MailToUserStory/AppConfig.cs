@@ -10,7 +10,6 @@ namespace MailToUserStory
   {
     public required GraphConfig Graph { get; init; }
     public required TfsConfig Tfs { get; init; }
-    public PollingConfig Polling { get; init; } = new();
     public string DatabasePath { get; init; } = "stories.db";
 
     public record GraphConfig
@@ -29,7 +28,5 @@ namespace MailToUserStory
       public string? User { get; init; }
       public string Password { get; init; }
     }
-
-    public record PollingConfig { public int Minutes { get; init; } = 5; }
   }
 }
