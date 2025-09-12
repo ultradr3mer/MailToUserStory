@@ -100,27 +100,20 @@ namespace MailToUserStory
 
     public static async Task SendInfoReplyAsync(GraphServiceClient graph, string mailbox, Message original, string infoBody, string? subjectSuffix)
     {
-      // Create a draft reply to preserve threading, then patch subject/body, then send
-      var draft = await graph.Users[new GraphUserFolder(mailbox).User].Messages[original.Id!].CreateReply.PostAsync(new Microsoft.Graph.Users.Item.Messages.Item.CreateReply.CreateReplyPostRequestBody
-      {
-        Message = new Message
-        {
-          Body = new ItemBody { ContentType = BodyType.Text, Content = infoBody }
-        }
-      });
-
-      if (draft == null) throw new Exception("Failed to create reply draft");
-
       string subject = original.Subject ?? string.Empty;
       if (!string.IsNullOrEmpty(subjectSuffix)) subject = subject + subjectSuffix;
 
-      await graph.Users[new GraphUserFolder(mailbox).User].Messages[draft.Id!].PatchAsync(new Message
+      var msg = new Message
       {
+        ToRecipients = [ original.From ],
         Subject = subject,
         Body = new ItemBody { ContentType = BodyType.Text, Content = infoBody }
-      });
+      };
 
-      await graph.Users[new GraphUserFolder(mailbox).User].Messages[draft.Id!].Send.PostAsync();
+      var sendRequest = new Microsoft.Graph.Users.Item.SendMail.SendMailPostRequestBody()
+      { Message = msg, SaveToSentItems = false /* Avoid Loopback */ };
+
+      await graph.Users[new GraphUserFolder(mailbox).User].SendMail.PostAsync(sendRequest);
     }
 
     public static Task SendErrorReplyAsync(GraphServiceClient graph, string mailbox, Message original, string errorText)
