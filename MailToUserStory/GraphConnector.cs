@@ -11,6 +11,7 @@ namespace MailToUserStory
   {
     private const string InboxWellKnownFolderName = "Inbox";
     private const string SentItemsWellKnownFolderName = "SentItems";
+    private const string MailToTfsNotificationCategoryName = "MailToTfs-Notification";
 
     public static async IAsyncEnumerable<DeltaPage> DeltaPagesAsync(GraphServiceClient graph, string mailbox, string? deltaLink)
     {
@@ -35,7 +36,11 @@ namespace MailToUserStory
           .MailFolders[folderId].Messages.Delta
           .GetAsDeltaGetResponseAsync(r =>
           {
-            r.QueryParameters.Select = new[] { "id", "subject", "from", "toRecipients", "receivedDateTime", "hasAttachments", "body" };
+            r.QueryParameters.Select = new[]
+            {
+              "id", "subject", "from", "toRecipients",
+              "receivedDateTime", "hasAttachments", "body", "categories"
+            };
           });
       }
 
@@ -132,11 +137,12 @@ namespace MailToUserStory
       {
         ToRecipients = [original.From],
         Subject = subject,
-        Body = new ItemBody { ContentType = BodyType.Text, Content = infoBody }
+        Body = new ItemBody { ContentType = BodyType.Text, Content = infoBody },
+        Categories = new List<string> { MailToTfsNotificationCategoryName }
       };
 
       var sendRequest = new Microsoft.Graph.Users.Item.SendMail.SendMailPostRequestBody()
-      { Message = msg, SaveToSentItems = false /* Avoid Loopback */ };
+      { Message = msg, SaveToSentItems = true };
 
       await graph.Users[new GraphUserFolder(mailbox).User].SendMail.PostAsync(sendRequest);
     }
@@ -147,6 +153,11 @@ namespace MailToUserStory
     internal static string GetSentMailbox(string mailbox)
     {
       return new GraphUserFolder(mailbox).User + "/" + SentItemsWellKnownFolderName;
+    }
+
+    internal static bool HasNotificationCategory(Message msg)
+    {
+      return msg.Categories?.Any(c => string.Equals(c, MailToTfsNotificationCategoryName, StringComparison.OrdinalIgnoreCase)) == true;
     }
 
     private class GraphUserFolder

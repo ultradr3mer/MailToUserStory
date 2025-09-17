@@ -267,6 +267,12 @@ async Task<bool> ProcessSentMessage(string mailbox, Microsoft.Graph.Models.Messa
     return false;
   }
 
+  if(GraphConnector.HasNotificationCategory(msg))
+  {
+    Console.WriteLine($"Message is a self emited notification, skipping.");
+    return false;
+  }
+
   // Try to extract User Story ID from subject
   int? usId = Util.ParseUserStoryId(msg.Subject);
 
