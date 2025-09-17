@@ -173,7 +173,8 @@ async Task<bool> ProcessIncommingMessage(string mailbox, Microsoft.Graph.Models.
       if (description == null)
       {
         Console.WriteLine($"User Story #{existingId} not found in TFS. Sending error reply.");
-        await GraphConnector.SendErrorReplyAsync(graph, mailbox, msg, $"User Story #{existingId} was not found in TFS.");
+        await GraphConnector.SendErrorReplyAsync(graph, mailbox, msg,
+          errorBody: string.Format(app.Graph.UsNotFoundTemplate,existingId));
         db.MarkProcessed(msg.Id!, mailbox, null, "us-not-found");
         return false;
       }
@@ -195,7 +196,7 @@ async Task<bool> ProcessIncommingMessage(string mailbox, Microsoft.Graph.Models.
       );
 
       await GraphConnector.SendInfoReplyAsync(graph, mailbox, msg,
-        $"User Story [US#{existingId}] was updated.", null);
+        infoBody: string.Format(app.Graph.UsUpdatedTemplate, existingId));
 
       Console.WriteLine($"Updated User Story #{existingId} with new comment/attachments.");
       db.MarkProcessed(msg.Id!, mailbox, existingId, "updated", prepared.html);
@@ -238,7 +239,7 @@ async Task<bool> ProcessIncommingMessage(string mailbox, Microsoft.Graph.Models.
       db.LinkStory(mailbox, newId);
 
       await GraphConnector.SendInfoReplyAsync(graph, mailbox, msg,
-        $"Created new User Story [US#{newId}] from your email.",
+        string.Format(app.Graph.UsCreatedTemplate, newId),
         subjectSuffix: $" [US#{newId}]"
       );
 

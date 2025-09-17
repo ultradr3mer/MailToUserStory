@@ -13,6 +13,9 @@
       public required string ClientId { get; init; }
       public string? ClientSecret { get; init; }
       public required string[] Mailboxes { get; init; }
+      public required string UsCreatedTemplate { get; init; }
+      public required string UsUpdatedTemplate { get; init; }
+      public required string UsNotFoundTemplate { get; init; }
     }
 
     public record TfsConfig

@@ -128,7 +128,7 @@ namespace MailToUserStory
       return new AttachmentContainer() { FileAttachments = fileAttachments, InlineAttachments = inlineAttachments };
     }
 
-    public static async Task SendInfoReplyAsync(GraphServiceClient graph, string mailbox, Message original, string infoBody, string? subjectSuffix)
+    public static async Task SendInfoReplyAsync(GraphServiceClient graph, string mailbox, Message original, string infoBody, string? subjectSuffix = null)
     {
       string subject = original.Subject ?? string.Empty;
       if (!string.IsNullOrEmpty(subjectSuffix)) subject = subject + subjectSuffix;
@@ -137,7 +137,7 @@ namespace MailToUserStory
       {
         ToRecipients = [original.From],
         Subject = subject,
-        Body = new ItemBody { ContentType = BodyType.Text, Content = infoBody },
+        Body = new ItemBody { ContentType = BodyType.Html, Content = infoBody },
         Categories = new List<string> { MailToTfsNotificationCategoryName }
       };
 
@@ -147,8 +147,8 @@ namespace MailToUserStory
       await graph.Users[new GraphUserFolder(mailbox).User].SendMail.PostAsync(sendRequest);
     }
 
-    public static Task SendErrorReplyAsync(GraphServiceClient graph, string mailbox, Message original, string errorText)
-          => SendInfoReplyAsync(graph, mailbox, original, errorText, null);
+    public static Task SendErrorReplyAsync(GraphServiceClient graph, string mailbox, Message original, string errorBody)
+          => SendInfoReplyAsync(graph, mailbox, original, errorBody, null);
 
     internal static string GetSentMailbox(string mailbox)
     {
