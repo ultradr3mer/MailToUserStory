@@ -69,15 +69,40 @@ namespace MailToUserStory
       if (folderName == InboxWellKnownFolderName || folderName == SentItemsWellKnownFolderName)
         return folderName;
 
-      var folders = await graph.Users[user].MailFolders.GetAsync();
-      var folder = folders?.Value?.FirstOrDefault(f =>
-          string.Equals(f.DisplayName, folderName, StringComparison.OrdinalIgnoreCase));
+      // Initial request from msgfolderroot
+      var response = await graph.Users[user]
+                                .MailFolders["msgfolderroot"]
+                                .ChildFolders
+                                .GetAsync();
 
-      return folder?.Id;
+      while (response != null)
+      {
+        foreach (var f in response.Value)
+        {
+          if (string.Equals(f.DisplayName, folderName, StringComparison.OrdinalIgnoreCase))
+            return f.Id;
+        }
+
+        if (response.OdataNextLink != null)
+        {
+          // Create new request using the NextLink
+          var nextPage = new Microsoft.Graph.Users.Item.MailFolders.Item.ChildFolders.ChildFoldersRequestBuilder(
+              response.OdataNextLink,
+              graph.RequestAdapter);
+
+          response = await nextPage.GetAsync();
+        }
+        else
+        {
+          response = null;
+        }
+      }
+
+      return null;
     }
 
     public static bool IsSelf(string mailbox, Message msg)
-    => string.Equals(msg.From?.EmailAddress?.Address, new GraphUserFolder(mailbox).User, StringComparison.OrdinalIgnoreCase);
+=> string.Equals(msg.From?.EmailAddress?.Address, new GraphUserFolder(mailbox).User, StringComparison.OrdinalIgnoreCase);
 
     public static async Task<AttachmentContainer> GetFileAttachmentsAsync(GraphServiceClient graph, string mailbox, string messageId)
     {
@@ -105,7 +130,7 @@ namespace MailToUserStory
 
       var msg = new Message
       {
-        ToRecipients = [ original.From ],
+        ToRecipients = [original.From],
         Subject = subject,
         Body = new ItemBody { ContentType = BodyType.Text, Content = infoBody }
       };
