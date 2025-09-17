@@ -180,18 +180,6 @@ The console output gives a step‑by‑step trace of what is happening.
 
 ---
 
-## Troubleshooting
-
-| Symptom | Likely cause | Fix |
-|---------|--------------|-----|
-| `Graph:ClientSecret missing` | User‑secret not set | Run `dotnet user-secrets set Graph:ClientSecret "..."` |
-| `Tfs:Password missing` | User‑secret not set | Run `dotnet user-secrets set Tfs:Password "..."` |
-| No messages processed | Delta token expired | Delete the `DeltaTokens` table entry for the mailbox or run `db.UpsertDeltaLink` manually |
-| Attachments missing | Graph API not returning attachments | Ensure the message is fetched with `?$expand=attachments` |
-| AI summary not inserted | `app.Ollama.Enabled` = false | Set to `true` in config or enable via user‑secrets |
-
----
-
 ## Contributing
 
 1. Fork the repository.  
