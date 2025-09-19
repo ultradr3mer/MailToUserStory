@@ -36,15 +36,6 @@ ON CONFLICT(address) DO UPDATE SET delta_link=excluded.delta_link";
     tx.Commit();
   }
 
-  public bool WasProcessed(string messageId)
-  {
-    using var cmd = _conn.CreateCommand();
-    cmd.CommandText = "SELECT 1 FROM ProcessedEmails WHERE graph_message_id=@id LIMIT 1";
-    cmd.Parameters.AddWithValue("@id", messageId);
-    using var r = cmd.ExecuteReader();
-    return r.Read();
-  }
-
   public void MarkProcessed(string messageId, string mailbox, int? workItemId, string outcome, string content = "")
   {
     using var tx = _conn.BeginTransaction();

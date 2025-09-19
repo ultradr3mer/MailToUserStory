@@ -48,7 +48,8 @@ Db.InitializeSchema(db);
 // Create Graph SDK client
 var credential = new ClientSecretCredential(app.Graph.TenantId, app.Graph.ClientId, app.Graph.ClientSecret);
 var scopes = new[] { "https://graph.microsoft.com/.default" };
-var graph = new GraphServiceClient(credential, scopes);
+var graphClient = new GraphServiceClient(credential, scopes);
+var graph = new GraphConnector(graphClient);
 
 // Create TFS client
 var tfsUri = new Uri(app.Tfs.BaseUrl);
@@ -77,7 +78,7 @@ foreach (var mailbox in app.Graph.Mailboxes)
 
   // Iterate all delta pages (new + changed messages)
   string? deltaLink = db.GetDeltaLink(mailbox);
-  await foreach (var page in GraphConnector.DeltaPagesAsync(graph, mailbox, deltaLink))
+  await foreach (var page in graph.DeltaPagesAsync(mailbox, deltaLink, app.Graph.BeginDate))
   {
     Console.WriteLine($"Received {page.Messages.Count} incomming messages from delta query for {mailbox}");
 
@@ -107,7 +108,7 @@ foreach (var mailbox in app.Graph.Mailboxes)
   // For sent messages
   var sentMailbox = GraphConnector.GetSentMailbox(mailbox);
   string? sentDeltaLink = db.GetDeltaLink(sentMailbox);
-  await foreach (var page in GraphConnector.DeltaPagesAsync(graph, sentMailbox, sentDeltaLink))
+  await foreach (var page in graph.DeltaPagesAsync(sentMailbox, sentDeltaLink, app.Graph.BeginDate))
   {
     Console.WriteLine($"Received {page.Messages.Count} outgoing messages from delta query for {sentMailbox}");
 
@@ -136,6 +137,12 @@ foreach (var mailbox in app.Graph.Mailboxes)
 }
 
 Console.WriteLine("All mailboxes processed. Done.");
+
+if(app.Pause)
+{
+  Console.WriteLine("Press any key to continue...");
+  Console.ReadKey(intercept: true);
+}
 return;
 
 // ----------------------------
@@ -144,7 +151,7 @@ return;
 async Task<bool> ProcessIncommingMessage(string mailbox, Microsoft.Graph.Models.Message msg)
 {
   // Skip if we already processed this message
-  if (db.WasProcessed(msg.Id!))
+  if (GraphConnector.WasProcessed(msg))
   {
     Console.WriteLine($"Message already processed, skipping.");
     return false;
@@ -173,8 +180,12 @@ async Task<bool> ProcessIncommingMessage(string mailbox, Microsoft.Graph.Models.
       if (description == null)
       {
         Console.WriteLine($"User Story #{existingId} not found in TFS. Sending error reply.");
-        await GraphConnector.SendErrorReplyAsync(graph, mailbox, msg,
-          errorBody: string.Format(app.Graph.UsNotFoundTemplate,existingId));
+        await graph.SendErrorReplyAsync(mailbox, msg,
+          errorBody: string.Format(app.Graph.UsNotFoundTemplate, existingId));
+
+        await graph.CategorizeDoneAsync(msg, mailbox);
+        Console.WriteLine($"Categorized mail as done.");
+
         db.MarkProcessed(msg.Id!, mailbox, null, "us-not-found");
         return false;
       }
@@ -195,10 +206,13 @@ async Task<bool> ProcessIncommingMessage(string mailbox, Microsoft.Graph.Models.
         newDesc
       );
 
-      await GraphConnector.SendInfoReplyAsync(graph, mailbox, msg,
+      await graph.SendInfoReplyAsync(mailbox, msg,
         infoBody: string.Format(app.Graph.UsUpdatedTemplate, existingId));
-
       Console.WriteLine($"Updated User Story #{existingId} with new comment/attachments.");
+
+      await graph.CategorizeDoneAsync(msg, mailbox);
+      Console.WriteLine($"Categorized mail as done.");
+
       db.MarkProcessed(msg.Id!, mailbox, existingId, "updated", prepared.html);
     }
     else
@@ -238,10 +252,13 @@ async Task<bool> ProcessIncommingMessage(string mailbox, Microsoft.Graph.Models.
 
       db.LinkStory(mailbox, newId);
 
-      await GraphConnector.SendInfoReplyAsync(graph, mailbox, msg,
+      await graph.SendInfoReplyAsync(mailbox, msg,
         string.Format(app.Graph.UsCreatedTemplate, newId),
         subjectSuffix: $" [US#{newId}]"
       );
+
+      await graph.CategorizeDoneAsync(msg, mailbox);
+      Console.WriteLine($"Categorized mail as done.");
 
       db.MarkProcessed(msg.Id!, mailbox, newId, "created", prepared.html);
     }
@@ -262,13 +279,13 @@ async Task<bool> ProcessIncommingMessage(string mailbox, Microsoft.Graph.Models.
 async Task<bool> ProcessSentMessage(string mailbox, Microsoft.Graph.Models.Message msg)
 {
   // Skip if we already processed this message
-  if (db.WasProcessed(msg.Id!))
+  if (GraphConnector.WasProcessed(msg))
   {
     Console.WriteLine($"Message already processed, skipping.");
     return false;
   }
 
-  if(GraphConnector.HasNotificationCategory(msg))
+  if (GraphConnector.HasNotificationCategory(msg))
   {
     Console.WriteLine($"Message is a self emited notification, skipping.");
     return false;
@@ -289,6 +306,9 @@ async Task<bool> ProcessSentMessage(string mailbox, Microsoft.Graph.Models.Messa
       string? description = await TfsConnector.WorkItemExistsingDescriptionAsync(wit, existingId);
       if (description == null)
       {
+        await graph.CategorizeDoneAsync(msg, mailbox);
+        Console.WriteLine($"Categorized mail as done.");
+
         db.MarkProcessed(msg.Id!, mailbox, null, "us-not-found");
         return false;
       }
@@ -310,6 +330,10 @@ async Task<bool> ProcessSentMessage(string mailbox, Microsoft.Graph.Models.Messa
       );
 
       Console.WriteLine($"Updated User Story #{existingId} with new comment/attachments.");
+
+      await graph.CategorizeDoneAsync(msg, mailbox);
+      Console.WriteLine($"Categorized mail as done.");
+
       db.MarkProcessed(msg.Id!, mailbox, existingId, "updated", prepared.html);
     }
     else

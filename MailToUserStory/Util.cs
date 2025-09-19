@@ -9,11 +9,11 @@ namespace MailToUserStory
 {
   public static class Util
   {
-    public static async Task<(string html, List<AttachmentPayload> attachments)> PrepareContentAsync(GraphServiceClient graph, string mailbox, Message msg, ReverseMarkdown.Converter converter)
+    public static async Task<(string html, List<AttachmentPayload> attachments)> PrepareContentAsync(GraphConnector graph, string mailbox, Message msg, ReverseMarkdown.Converter converter)
     {
       var attachments = new List<AttachmentPayload>();
 
-      var container = await GraphConnector.GetFileAttachmentsAsync(graph, mailbox, msg.Id!);
+      var container = await graph.GetFileAttachmentsAsync(mailbox, msg.Id!);
       foreach (var fa in container.FileAttachments)
       {
         attachments.Add(new AttachmentPayload

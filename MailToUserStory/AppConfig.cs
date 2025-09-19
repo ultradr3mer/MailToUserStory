@@ -6,6 +6,7 @@
     public required TfsConfig Tfs { get; init; }
     public string DatabasePath { get; init; } = "stories.db";
     public required OllamaConfig Ollama { get; init; }
+    public required bool Pause { get; init; }
 
     public record GraphConfig
     {
@@ -16,6 +17,7 @@
       public required string UsCreatedTemplate { get; init; }
       public required string UsUpdatedTemplate { get; init; }
       public required string UsNotFoundTemplate { get; init; }
+      public required DateTime BeginDate { get; init; }
     }
 
     public record TfsConfig

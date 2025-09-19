@@ -1,14 +1,18 @@
 ﻿using MailToUserStory.Data;
 using Microsoft.TeamFoundation.WorkItemTracking.WebApi;
 using Microsoft.TeamFoundation.WorkItemTracking.WebApi.Models;
+using Microsoft.VisualStudio.Services.Common;
+using Microsoft.VisualStudio.Services.WebApi;
+using Microsoft.VisualStudio.Services.WebApi.Patch;
 using Microsoft.VisualStudio.Services.WebApi.Patch.Json;
 using System.Net;
-using Microsoft.VisualStudio.Services.WebApi.Patch;
 
 namespace MailToUserStory
 {
   public static class TfsConnector
   {
+    private static string TfsUsNotFoundErrorCode = "TF401232";
+
     public static async Task<string?> WorkItemExistsingDescriptionAsync(
         WorkItemTrackingHttpClient wit,
         int id)
@@ -19,8 +23,8 @@ namespace MailToUserStory
         wi.Fields.TryGetValue("System.Description", out var desc);
         return desc as string ?? string.Empty;
       }
-      catch (Microsoft.VisualStudio.Services.WebApi.VssServiceResponseException ex)
-          when (ex.HttpStatusCode == HttpStatusCode.NotFound)
+      catch (VssServiceException ex) 
+        when (ex.Message.StartsWith(TfsUsNotFoundErrorCode))
       {
         return null;
       }

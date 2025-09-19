@@ -2,28 +2,34 @@
 using MailToUserStory.Data;
 using Microsoft.Graph;
 using Microsoft.Graph.Models;
-using System;
 using DeltaGetResponse = Microsoft.Graph.Users.Item.MailFolders.Item.Messages.Delta.DeltaGetResponse;
 
 namespace MailToUserStory
 {
-  public static class GraphConnector
+  public class GraphConnector
   {
     private const string InboxWellKnownFolderName = "Inbox";
     private const string SentItemsWellKnownFolderName = "SentItems";
     private const string MailToTfsNotificationCategoryName = "MailToTfs-Notification";
+    private const string MailToTfsDoneCategoryName = "MailToTfs-Done";
+    private readonly GraphServiceClient client;
 
-    public static async IAsyncEnumerable<DeltaPage> DeltaPagesAsync(GraphServiceClient graph, string mailbox, string? deltaLink)
+    public GraphConnector(GraphServiceClient client)
+    {
+      this.client = client;
+    }
+
+    public async IAsyncEnumerable<DeltaPage> DeltaPagesAsync(string mailbox, string? deltaLink, DateTime beginDate)
     {
       var userFolder = new GraphUserFolder(mailbox);
 
-      var folderId = await ResolveFolderIdAsync(graph, userFolder.User, userFolder.Folder);
+      var folderId = await ResolveFolderIdAsync(userFolder.User, userFolder.Folder);
 
       DeltaGetResponse? page;
       if (!string.IsNullOrEmpty(deltaLink))
       {
         // Resume from stored delta link
-        page = await graph.RequestAdapter.SendAsync<DeltaGetResponse>(new Microsoft.Kiota.Abstractions.RequestInformation
+        page = await this.client.RequestAdapter.SendAsync<DeltaGetResponse>(new Microsoft.Kiota.Abstractions.RequestInformation
         {
           HttpMethod = Microsoft.Kiota.Abstractions.Method.GET,
           UrlTemplate = deltaLink,
@@ -32,7 +38,7 @@ namespace MailToUserStory
       }
       else
       {
-        page = await graph.Users[userFolder.User]
+        page = await this.client.Users[userFolder.User]
           .MailFolders[folderId].Messages.Delta
           .GetAsDeltaGetResponseAsync(r =>
           {
@@ -41,6 +47,8 @@ namespace MailToUserStory
               "id", "subject", "from", "toRecipients",
               "receivedDateTime", "hasAttachments", "body", "categories"
             };
+
+            r.QueryParameters.Filter = "receivedDateTime ge " + beginDate.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
           });
       }
 
@@ -55,7 +63,7 @@ namespace MailToUserStory
 
         if (!string.IsNullOrEmpty(page.OdataNextLink))
         {
-          page = await graph.RequestAdapter.SendAsync<DeltaGetResponse>(new Microsoft.Kiota.Abstractions.RequestInformation
+          page = await this.client.RequestAdapter.SendAsync<DeltaGetResponse>(new Microsoft.Kiota.Abstractions.RequestInformation
           {
             HttpMethod = Microsoft.Kiota.Abstractions.Method.GET,
             UrlTemplate = page.OdataNextLink,
@@ -69,13 +77,13 @@ namespace MailToUserStory
       }
     }
 
-    private static async Task<string?> ResolveFolderIdAsync(GraphServiceClient graph, string user, string folderName)
+    private async Task<string?> ResolveFolderIdAsync(string user, string folderName)
     {
       if (folderName == InboxWellKnownFolderName || folderName == SentItemsWellKnownFolderName)
         return folderName;
 
       // Initial request from msgfolderroot
-      var response = await graph.Users[user]
+      var response = await this.client.Users[user]
                                 .MailFolders["msgfolderroot"]
                                 .ChildFolders
                                 .GetAsync();
@@ -93,7 +101,7 @@ namespace MailToUserStory
           // Create new request using the NextLink
           var nextPage = new Microsoft.Graph.Users.Item.MailFolders.Item.ChildFolders.ChildFoldersRequestBuilder(
               response.OdataNextLink,
-              graph.RequestAdapter);
+              this.client.RequestAdapter);
 
           response = await nextPage.GetAsync();
         }
@@ -107,13 +115,13 @@ namespace MailToUserStory
     }
 
     public static bool IsSelf(string mailbox, Message msg)
-=> string.Equals(msg.From?.EmailAddress?.Address, new GraphUserFolder(mailbox).User, StringComparison.OrdinalIgnoreCase);
+      => string.Equals(msg.From?.EmailAddress?.Address, new GraphUserFolder(mailbox).User, StringComparison.OrdinalIgnoreCase);
 
-    public static async Task<AttachmentContainer> GetFileAttachmentsAsync(GraphServiceClient graph, string mailbox, string messageId)
+    public async Task<AttachmentContainer> GetFileAttachmentsAsync(string mailbox, string messageId)
     {
       var fileAttachments = new List<FileAttachment>();
       var inlineAttachments = new List<FileAttachment>();
-      var page = await graph.Users[new GraphUserFolder(mailbox).User].Messages[messageId].Attachments.GetAsync();
+      var page = await client.Users[new GraphUserFolder(mailbox).User].Messages[messageId].Attachments.GetAsync();
       foreach (var att in page?.Value ?? Enumerable.Empty<Attachment>())
       {
         if (!(att is FileAttachment fa) || fa.ContentBytes == null)
@@ -128,7 +136,7 @@ namespace MailToUserStory
       return new AttachmentContainer() { FileAttachments = fileAttachments, InlineAttachments = inlineAttachments };
     }
 
-    public static async Task SendInfoReplyAsync(GraphServiceClient graph, string mailbox, Message original, string infoBody, string? subjectSuffix = null)
+    public async Task SendInfoReplyAsync(string mailbox, Message original, string infoBody, string? subjectSuffix = null)
     {
       string subject = original.Subject ?? string.Empty;
       if (!string.IsNullOrEmpty(subjectSuffix)) subject = subject + subjectSuffix;
@@ -144,11 +152,11 @@ namespace MailToUserStory
       var sendRequest = new Microsoft.Graph.Users.Item.SendMail.SendMailPostRequestBody()
       { Message = msg, SaveToSentItems = true };
 
-      await graph.Users[new GraphUserFolder(mailbox).User].SendMail.PostAsync(sendRequest);
+      await this.client.Users[new GraphUserFolder(mailbox).User].SendMail.PostAsync(sendRequest);
     }
 
-    public static Task SendErrorReplyAsync(GraphServiceClient graph, string mailbox, Message original, string errorBody)
-          => SendInfoReplyAsync(graph, mailbox, original, errorBody, null);
+    public Task SendErrorReplyAsync(string mailbox, Message original, string errorBody)
+          => this.SendInfoReplyAsync(mailbox, original, errorBody, null);
 
     internal static string GetSentMailbox(string mailbox)
     {
@@ -160,6 +168,33 @@ namespace MailToUserStory
       return msg.Categories?.Any(c => string.Equals(c, MailToTfsNotificationCategoryName, StringComparison.OrdinalIgnoreCase)) == true;
     }
 
+    internal async Task CategorizeDoneAsync(Message msg, string mailbox)
+    {
+      if (msg == null || string.IsNullOrEmpty(msg.Id))
+        throw new ArgumentException("Message must not be null and must have an Id", nameof(msg));
+
+      // Build updated categories list
+      var categories = (msg.Categories ?? new List<string>()).ToList();
+      if (categories.Contains(MailToTfsDoneCategoryName))
+        return;
+
+      categories.Add(MailToTfsDoneCategoryName);
+
+      var update = new Message
+      {
+        Categories = categories
+      };
+
+      await client.Users[new GraphUserFolder(mailbox).User]
+          .Messages[msg.Id]
+          .PatchAsync(update);
+    }
+
+    internal static bool WasProcessed(Message msg)
+    {
+      return msg.Categories?.Any(c => string.Equals(c, MailToTfsDoneCategoryName, StringComparison.OrdinalIgnoreCase)) == true;
+    }
+
     private class GraphUserFolder
     {
       public GraphUserFolder(string mailbox)
@@ -167,13 +202,13 @@ namespace MailToUserStory
         if (mailbox.Contains("/"))
         {
           var split = mailbox.Split('/');
-          User = split[0];
-          Folder = split[1];
+          this.User = split[0];
+          this.Folder = split[1];
         }
         else
         {
-          User = mailbox;
-          Folder = InboxWellKnownFolderName;
+          this.User = mailbox;
+          this.Folder = InboxWellKnownFolderName;
         }
       }
 
