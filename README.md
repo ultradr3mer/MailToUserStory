@@ -1,210 +1,209 @@
-# MailToUserStory
+# Mail‑to‑User‑Story
 
 > **Author:** Clara  
-> **Version:** 1.0.0  
-> **Target Framework:** .NET 8.0  
-> **License:** MIT (see `LICENSE`)
+> **License:** MIT (see [LICENSE](LICENSE))  
+
+A lightweight .NET 8 command‑line tool that turns e‑mails into Team Foundation Server (TFS) *User Stories*.  
+It watches a set of mailboxes via Microsoft Graph, creates or updates work items in TFS, attaches the e‑mail body and any attachments, and optionally generates an AI‑powered summary of the conversation using an Ollama model.
 
 ---
 
 ## Table of Contents
 
-| Section |
-|---------|
-| [What is it?](#what-is-it) |
-| [Features](#features) |
-| [Architecture](#architecture) |
-| [Prerequisites](#prerequisites) |
-| [Installation](#installation) |
-| [Configuration](#configuration) |
-| [Running the App](#running-the-app) |
-| [How it Works](#how-it-works) |
-| [Database Schema](#database-schema) |
-| [Extending / Contributing](#extending--contributing) |
-| [Troubleshooting](#troubleshooting) |
-| [License](#license) |
+- [What it does](#what-it-does)
+- [Why you’ll love it](#why-youll-love-it)
+- [Architecture & key components](#architecture--key-components)
+- [Getting started](#getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Configuration](#configuration)
+  - [Secrets](#secrets)
+  - [Building & running](#building--running)
+- [How it works](#how-it-works)
+  - [Processing incoming mail](#processing-incoming-mail)
+  - [Processing outgoing mail](#processing-outgoing-mail)
+  - [Summary generation](#summary-generation)
+- [Extending / Customising](#extending--customising)
+- [Troubleshooting](#troubleshooting)
+- [Contributing](#contributing)
+- [License](#license)
+- [Acknowledgements](#acknowledgements)
 
 ---
 
-## What is it?
-
-`MailToUserStory` is a lightweight .NET 8 console application that bridges Microsoft Graph mailboxes and an on‑premises Azure DevOps / TFS instance.  
-It watches one or more mailboxes for new e‑mails, extracts a **User Story** ID from the subject line (or creates a new one), and updates the corresponding work item in TFS.  
-All processed e‑mails are recorded in a local SQLite database to guarantee idempotency and to keep track of delta tokens.
-
-> **Why?**  
-> In many teams, stakeholders send e‑mails that describe new features or bug reports.  
-> Manually creating or updating work items is tedious and error‑prone.  
-> This tool automates the process, ensuring that every e‑mail becomes a traceable work item with attachments and comments.
-
----
-
-## Features
+## What it does
 
 | Feature | Description |
 |---------|-------------|
-| **Delta polling** | Uses Microsoft Graph delta queries to fetch only new or changed messages. |
-| **Idempotent processing** | Stores processed message IDs in SQLite; skips duplicates. |
-| **Self‑sent e‑mail guard** | Detects and ignores e‑mails sent by the monitored mailbox itself. |
-| **User Story ID extraction** | Parses `[US#12345]` tokens from the subject line. |
-| **Create / Update** | Creates a new User Story if no ID is found; otherwise updates the existing one. |
-| **Attachments** | Downloads all file attachments, uploads them to TFS, and attaches them to the work item. |
-| **Reply notifications** | Sends a reply back to the sender with a canonical subject token and a short status message. |
-| **Markdown conversion** | Converts the e‑mail body to Markdown (via `ReverseMarkdown`) before posting it as a comment. |
-| **SQLite state store** | Persists delta tokens, processed message IDs, and mailbox‑story links. |
-| **Configuration via JSON + User Secrets** | Keeps secrets out of source control. |
-| **Extensible** | All core logic is split into small, testable classes (`GraphConnector`, `TfsConnector`, `Util`, `Db`). |
+| **E‑mail → TFS** | Detects a `[US#123]` marker in the subject line. If the ID exists, it appends a comment and attachments to the work item; otherwise it creates a new *User Story* and replies with a confirmation. |
+| **Outgoing mail → TFS** | When you send an e‑mail that contains a `[US#123]` reference, the tool automatically updates the corresponding work item with the e‑mail body and attachments. |
+| **State persistence** | Uses a local SQLite database to store Graph delta tokens, processed message IDs, and a simple lock for concurrent runs. |
+| **AI summarisation** | Optional AI‑generated summary of the conversation using an Ollama model. The summary is inserted into the work item description. |
+| **Attachment handling** | All file attachments are downloaded, re‑encoded to JPEG (70 % quality) if inline, and stored as `AttachmentPayload` objects. |
+| **HTML sanitisation** | The e‑mail body is cleaned of scripts/styles, inline images are embedded as data‑URLs, and the resulting HTML is safe for display or storage. |
 
 ---
 
-## Architecture
+## Architecture & key components
 
-* **GraphConnector** – thin wrapper around the Microsoft Graph SDK.  
-* **TfsConnector** – thin wrapper around the Azure DevOps/TFS REST client.  
-* **Util** – helper functions for HTML sanitisation, Markdown conversion, and ID parsing.  
-* **Db** – simple SQLite wrapper that keeps the application state.
+```
+src/
+├─ AppConfig.cs          → Configuration POCO
+├─ Db.cs                 → SQLite wrapper (delta tokens, processed mails)
+├─ GraphConnector.cs     → Microsoft Graph SDK helper
+├─ TfsConnector.cs       → Azure DevOps / TFS helper
+├─ Util.cs               → E‑mail body & attachment processing
+├─ SummaryGenerator.cs   → AI summarisation wrapper
+├─ SummaryGenerator.cs   → Ollama client
+└─ Program.cs            → Main loop (CLI)
+```
+
+* **`GraphConnector`** – Handles delta queries for both inbox and sent items, fetches attachments, and sends notification e‑mails.
+* **`TfsConnector`** – Builds JSON‑patch documents to create/update work items and upload attachments.
+* **`Util`** – Pulls raw data from Graph, sanitises HTML, re‑encodes images, extracts `[US#123]` IDs, and provides simple assertions.
+* **`SummaryGenerator`** – Delegates to `OllamaClient` to generate a summary and injects it into the work‑item description.
+* **`Db`** – Keeps track of processed message IDs and the latest delta token for each mailbox.
 
 ---
 
-## Prerequisites
+## Getting started
 
-| Item | Minimum Version | Notes |
+### Prerequisites
+
+| Item | Minimum version | Notes |
 |------|-----------------|-------|
-| .NET SDK | 8.0 | Install from <https://dotnet.microsoft.com/download> |
-| Azure AD App | – | Must have `Mail.ReadWrite` and `Mail.Send` permissions. |
-| TFS / Azure DevOps Server | 2022+ | On‑premises instance with Work Item Tracking enabled. |
-| SQLite | – | Included via `Microsoft.Data.Sqlite` NuGet package. |
-| Git | – | For cloning the repo. |
+| .NET SDK | 8.0 | Download from <https://dotnet.microsoft.com/download> |
+| Microsoft Graph app registration | – | Must have `Mail.ReadWrite`, `Mail.ReadWrite.Shared`, `Mail.ReadWrite.All` scopes |
+| Azure DevOps / TFS instance | – | Project name, user & password |
+| Ollama server (optional) | – | For AI summarisation |
+| SQLite (bundled with .NET) | – | No external dependency |
 
----
+### Configuration
 
-## Installation
+Create an `appsettings.json` (or `appsettings.Development.json`) in the project root:
 
-```bash
-# Clone the repo
-git clone https://github.com/yourorg/mail-to-userstory.git
-cd mail-to-userstory
-
-# Restore NuGet packages
-dotnet restore
+```json
+{
+  "DatabasePath": "state.db",
+  "Graph": {
+    "TenantId": "YOUR_TENANT_ID",
+    "ClientId": "YOUR_CLIENT_ID",
+    "ClientSecret": "YOUR_CLIENT_SECRET",
+    "UsCreatedTemplate": "User Story #{0} created successfully.",
+    "UsUpdatedTemplate": "User Story #{0} updated.",
+    "UsNotFoundTemplate": "User Story #{0} not found."
+  },
+  "Tfs": {
+    "BaseUrl": "https://dev.azure.com/yourorg",
+    "User": "your-username",
+    "Password": "your-password",
+    "Project": "YourProject"
+  },
+  "Ollama": {
+    "Host": "http://localhost:11434",
+    "Model": "llama3",
+    "SummarizeInstruction": "Summarise the following conversation:",
+    "Enabled": true
+  }
+}
 ```
 
----
-
-## Configuration
-
-The application uses a combination of JSON files and **User Secrets** to keep sensitive data out of source control.
-
-| File | Purpose | Example |
-|------|---------|---------|
-| `appsettings.json` | Default configuration (non‑secret values). | `{"Graph":{"TenantId":"<tenant-id>","ClientId":"<client-id>","Mailboxes":["user@contoso.com"]},"Tfs":{"BaseUrl":"https://tfs.contoso.com","ProjectCollection":"DefaultCollection","Project":"MyProject","User":"tfsuser","Password":"<placeholder>"}}` |
-| `appsettings.local.json` | Optional overrides for local dev. | `{"Polling":{"Minutes":2}}` |
-| User Secrets | Secrets that must not be committed. | `dotnet user-secrets set "Graph:ClientSecret" "<client-secret>"`<br>`dotnet user-secrets set "Tfs:Password" "<tfs-password>"` |
-
-> **Tip:** The `UserSecretsId` is already defined in the `.csproj`.  
-> Run the following commands to set the secrets:
+> **NOTE**  
+> `ClientSecret` and `Password` are sensitive and should **not** be committed.  
+> Use **user‑secrets** or environment variables to override them:
 
 ```bash
-dotnet user-secrets set "Graph:ClientSecret" "<client-secret>"
-dotnet user-secrets set "Tfs:Password" "<tfs-password>"
+dotnet user-secrets set Graph:ClientSecret "your-client-secret"
+dotnet user-secrets set Tfs:Password "your-tfs-password"
 ```
 
----
-
-## Running the App
+### Building
 
 ```bash
-dotnet run
+dotnet build -c Release
 ```
 
-The console will output the progress for each mailbox, including:
+### Running
 
-* Delta page counts
-* Message subjects
-* Actions taken (created, updated, skipped, error)
+```bash
+dotnet run --project src
+```
 
-All processed messages are stored in `stories.db` (or the path specified in `appsettings.json`).
+The tool will:
 
----
+1. Initialise the SQLite database (`state.db` by default).
+2. Create a GraphServiceClient with the supplied credentials.
+3. Create a TFS connection.
+4. Process each mailbox listed in `Graph.Mailboxes`:
+   * Pull new/changed messages via delta queries.
+   * Create or update User Stories in TFS.
+   * Attach e‑mail body and any attachments.
+   * Send a confirmation e‑mail back to the sender.
+5. Repeat the same for the *sent* folder to keep the work items in sync.
 
-## How it Works (Step‑by‑step)
-
-1. **Startup**  
-   * Load configuration.  
-   * Initialise SQLite database (`Db.InitializeSchema`).  
-   * Create Graph and TFS clients.
-
-2. **Mailbox Loop**  
-   For each mailbox in `Graph.Mailboxes`:
-   * Retrieve the stored delta link (`db.GetDeltaLink`).  
-   * Call `GraphConnector.DeltaPagesAsync` to stream all new/changed messages.  
-   * For each message:
-     * Skip if already processed (`db.WasProcessed`).  
-     * Skip if sent by the mailbox itself (`GraphConnector.IsSelf`).  
-     * Parse `[US#12345]` from the subject (`Util.ParseUserStoryId`).  
-     * **If ID exists**  
-       * Verify the work item exists (`TfsConnector.WorkItemExistsAsync`).  
-       * Prepare content (`Util.PrepareContentAsync`).  
-       * Add comment + attachments (`TfsConnector.AddCommentAndAttachmentsAsync`).  
-       * Send reply (`GraphConnector.SendInfoReplyAsync`).  
-       * Mark as processed (`db.MarkProcessed`).  
-     * **If no ID**  
-       * Prepare content.  
-       * Create new User Story (`TfsConnector.CreateUserStoryAsync`).  
-       * Upload attachments (`TfsConnector.AddAttachmentsAsync`).  
-       * Link mailbox to story (`db.LinkStory`).  
-       * Send reply.  
-       * Mark as processed.  
-   * After finishing a delta page, store the new delta link (`db.UpsertDeltaLink`).
-
-3. **Shutdown**  
-   * Dispose of the SQLite connection.  
-   * Exit.
+The console output gives a step‑by‑step trace of what is happening.
 
 ---
 
-## Database Schema
+## How it works – a deeper look
 
-The SQLite database contains three tables:
+### 1. Incoming e‑mail
 
-| Table | Columns | Purpose |
-|-------|---------|---------|
-| `Mailboxes` | `mailbox TEXT PRIMARY KEY`, `delta_link TEXT` | Stores the last delta link per mailbox. |
-| `Stories` | `mailbox TEXT`, `work_item_id INTEGER`, `PRIMARY KEY(mailbox, work_item_id)` | Keeps a record of which work items belong to which mailbox. |
-| `ProcessedEmails` | `graph_message_id TEXT PRIMARY KEY`, `mailbox TEXT`, `work_item_id INTEGER`, `processed_at DATETIME`, `outcome TEXT` | Records every processed message to avoid duplicates. |
+* **Duplicate check** – `Db.WasProcessed(msg.Id)` prevents re‑processing.
+* **Self‑sent check** – `GraphConnector.IsSelf` skips messages sent by the monitored mailbox.
+* **Story ID extraction** – `Util.ParseUserStoryId(msg.Subject)` looks for `[US#123]`.
+* **Existing story** – If the ID exists:
+  * Retrieve current description (`TfsConnector.WorkItemExistsingDescriptionAsync`).
+  * Prepare the new comment (`Util.PrepareContentAsync`).
+  * Summarise the thread (`SummaryGenerator.Summarize`).
+  * Add comment & attachments (`TfsConnector.AddCommentAndAttachmentsAsync`).
+  * Reply with `GraphConnector.SendInfoReplyAsync`.
+* **New story** – If no ID:
+  * Create a new work item (`TfsConnector.CreateUserStoryAsync`).
+  * Add the first comment & attachments.
+  * Link the mailbox to the story (`Db.LinkStory`).
+  * Reply with a confirmation.
 
-The schema is created automatically on first run by `Db.InitializeSchema`.
+### 2. Outgoing e‑mail
+
+* Similar logic but only updates an existing story if the subject contains a `[US#123]` reference.
+* Self‑sent notifications (category `MailSentNotification`) are ignored.
+
+### 3. Summary generation
+
+* If `app.Ollama.Enabled` is `true`, the `SummaryGenerator` builds a conversation history, sanitises it for the LLM, and calls `OllamaClient.GenerateSummary`.
+* The AI summary is inserted into the work‑item description, wrapped by the `==== AI Generated Summary ==== ` marker.
+
+### 4. Attachment handling
+
+* Inline images (`cid:`) are re‑encoded to JPEG (70 % quality) and embedded as data URLs.
+* All attachments are uploaded to TFS via `CreateAttachmentAsync` and linked to the work item.
 
 ---
 
-## Extending / Contributing
+## Contributing
 
-Feel free to fork, branch, and submit pull requests.  
-When adding new features, keep the following in mind:
+1. Fork the repository.  
+2. Create a feature branch (`git checkout -b feature/xyz`).  
+3. Run `dotnet test` (if tests are added).  
+4. Submit a pull request.  
 
-1. **Keep the core logic testable** – add unit tests for new methods.  
-2. **Avoid hard‑coding** – use configuration or dependency injection.  
-3. **Document changes** – update the README and add comments where necessary.  
-
----
-
-## Troubleshooting
-
-| Symptom | Likely Cause | Fix |
-|---------|--------------|-----|
-| `ClientSecret` or `Password` missing | User secrets not set | Run the `dotnet user-secrets set` commands again. |
-| Graph API returns 401 | Wrong tenant/client ID or insufficient permissions | Verify Azure AD app registration and grant `Mail.ReadWrite` & `Mail.Send`. |
-| TFS returns 404 on work item | Wrong project name or missing permissions | Check `appsettings.json` for correct `Project` and that the user has *Edit work items* rights. |
-| SQLite file not created | Wrong path or permissions | Ensure the directory exists and the process has write access. |
-| Attachments not uploaded | Attachment size > 4 MB (Graph limit) | Split large attachments or use Graph's upload session. |
+All contributions must be licensed under MIT. Please keep the code style consistent with the existing files (use `dotnet format`).
 
 ---
 
 ## License
 
-MIT – see the `LICENSE` file for details.
+This project is licensed under the MIT License – see the [LICENSE](LICENSE) file for details.
 
 ---
 
-**Happy coding!**  
-If you run into any issues or have feature requests, open an issue or reach out to Clara.
+## Acknowledgements
+
+* [.NET 8](https://dotnet.microsoft.com/) – runtime & SDK  
+* [Microsoft Graph SDK](https://github.com/microsoftgraph/msgraph-sdk-dotnet) – e‑mail access  
+* [Azure DevOps / TFS Client](https://github.com/microsoft/azure-devops-dotnet) – work‑item API  
+* [ReverseMarkdown](https://github.com/ronjones/ReverseMarkdown) – Markdown ↔ HTML conversion  
+* [HtmlAgilityPack](https://github.com/zzzprojects/html-agility-pack) – HTML sanitisation  
+* [Ollama](https://ollama.ai/) – local LLM inference
+
+Happy coding!
