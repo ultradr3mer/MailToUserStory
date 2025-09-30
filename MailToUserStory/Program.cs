@@ -85,6 +85,12 @@ foreach (var mailbox in app.Graph.Mailboxes)
     int nr = 1;
     foreach (var msg in page.Messages)
     {
+      if (msg.Body == null && msg.Subject == null)
+      {
+        Console.WriteLine($"--> Message {nr++} was removed");
+        continue;
+      }
+
       Console.WriteLine($"--> Message {nr++} with Subject: {msg.Subject}");
 
       bool flowControl = await ProcessIncommingMessage(mailbox, msg);
@@ -339,8 +345,6 @@ async Task<bool> ProcessSentMessage(string mailbox, Microsoft.Graph.Models.Messa
     else
     {
       Console.WriteLine($"Sent mail withoutUser Story reference is ignored.");
-
-      db.MarkProcessed(msg.Id!, mailbox, null, "ignored");
     }
   }
   catch (Exception ex)
