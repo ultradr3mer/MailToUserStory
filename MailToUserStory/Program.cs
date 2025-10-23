@@ -69,65 +69,79 @@ var mdConverter = new ReverseMarkdown.Converter(new ReverseMarkdown.Config
   UnknownTags = ReverseMarkdown.Config.UnknownTagsOption.Bypass
 });
 
+Console.OutputEncoding = System.Text.Encoding.UTF8;
+
+string processingPrefix = "       ";
+
 // ----------------------------
 // Main loop: process all mailboxes
 // ----------------------------
-foreach (var mailbox in app.Graph.Mailboxes)
+foreach (var user in app.Graph.Users)
 {
-  Console.WriteLine($"=== Processing mailbox: {mailbox} ===");
+  Console.WriteLine($"=== Processing user: {user} ===");
 
-  // Iterate all delta pages (new + changed messages)
-  string? deltaLink = db.GetDeltaLink(mailbox);
-  await foreach (var page in graph.DeltaPagesAsync(mailbox, deltaLink, app.Graph.BeginDate))
+  foreach (var link in app.Links)
   {
-    Console.WriteLine($"Received {page.Messages.Count} incomming messages from delta query for {mailbox}");
+    var mailbox = user + "/" + link.Mailbox;
 
-    int nr = 1;
-    foreach (var msg in page.Messages)
+    Console.WriteLine($"╰→ Processing mailbox: {mailbox}");
+
+    // Iterate all delta pages (new + changed messages)
+    string? deltaLink = db.GetDeltaLink(mailbox);
+    await foreach (var page in graph.DeltaPagesAsync(mailbox, deltaLink, app.Graph.BeginDate))
     {
-      if (msg.Body == null && msg.Subject == null)
+      Console.WriteLine($"  ╰→ Received {page.Messages.Count} incomming messages from delta query for {mailbox}");
+
+      int nr = 1;
+      foreach (var msg in page.Messages)
       {
-        Console.WriteLine($"--> Message {nr++} was removed");
-        continue;
+        if (msg.Body == null && msg.Subject == null)
+        {
+          Console.WriteLine($"    ╰→ Message {nr++} was removed");
+          continue;
+        }
+
+        Console.WriteLine($"    ╰→ Message {nr++} with Subject: {msg.Subject}");
+
+        bool flowControl = await ProcessIncommingMessage(mailbox, link.Project, msg);
+
+        if (!flowControl)
+        {
+          Console.WriteLine($"       Skipped message");
+          continue;
+        }
       }
 
-      Console.WriteLine($"--> Message {nr++} with Subject: {msg.Subject}");
-
-      bool flowControl = await ProcessIncommingMessage(mailbox, msg);
-
-      if (!flowControl)
+      // Store new delta token for next run
+      if (!string.IsNullOrEmpty(page.DeltaLink))
       {
-        Console.WriteLine($"Skipped message");
-        continue;
+        deltaLink = page.DeltaLink;
+        db.UpsertDeltaLink(mailbox, deltaLink);
+        Console.WriteLine($"  ╰→ Updated delta link for {mailbox}");
       }
-    }
-
-    // Store new delta token for next run
-    if (!string.IsNullOrEmpty(page.DeltaLink))
-    {
-      deltaLink = page.DeltaLink;
-      db.UpsertDeltaLink(mailbox, deltaLink);
-      Console.WriteLine($"Updated delta link for {mailbox}");
     }
   }
 
   // For sent messages
-  var sentMailbox = GraphConnector.GetSentMailbox(mailbox);
+  var sentMailbox = GraphConnector.GetSentMailbox(user);
+  Console.WriteLine($"╰→ Processing mailbox: {sentMailbox}");
+
   string? sentDeltaLink = db.GetDeltaLink(sentMailbox);
   await foreach (var page in graph.DeltaPagesAsync(sentMailbox, sentDeltaLink, app.Graph.BeginDate))
   {
-    Console.WriteLine($"Received {page.Messages.Count} outgoing messages from delta query for {sentMailbox}");
+
+    Console.WriteLine($"  ╰→ Received {page.Messages.Count} outgoing messages from delta query for {sentMailbox}");
 
     int nr = 1;
     foreach (var msg in page.Messages)
     {
-      Console.WriteLine($"--> Message {nr++} with Subject: {msg.Subject}");
+      Console.WriteLine($"    ╰→ Message {nr++} with Subject: {msg.Subject}");
 
       bool flowControl = await ProcessSentMessage(sentMailbox, msg);
 
       if (!flowControl)
       {
-        Console.WriteLine($"Skipped message");
+        Console.WriteLine($"       Skipped message");
         continue;
       }
     }
@@ -137,14 +151,14 @@ foreach (var mailbox in app.Graph.Mailboxes)
     {
       sentDeltaLink = page.DeltaLink;
       db.UpsertDeltaLink(sentMailbox, sentDeltaLink);
-      Console.WriteLine($"Updated delta link for {sentMailbox}");
+      Console.WriteLine($"  ╰→ Updated delta link for {sentMailbox}");
     }
   }
 }
 
-Console.WriteLine("All mailboxes processed. Done.");
+Console.WriteLine("=== All mailboxes processed. Done. ===");
 
-if(app.Pause)
+if (app.Pause)
 {
   Console.WriteLine("Press any key to continue...");
   Console.ReadKey(intercept: true);
@@ -154,19 +168,19 @@ return;
 // ----------------------------
 // Process a single email
 // ----------------------------
-async Task<bool> ProcessIncommingMessage(string mailbox, Microsoft.Graph.Models.Message msg)
+async Task<bool> ProcessIncommingMessage(string mailbox, string project, Microsoft.Graph.Models.Message msg)
 {
   // Skip if we already processed this message
   if (GraphConnector.WasProcessed(msg))
   {
-    Console.WriteLine($"Message already processed, skipping.");
+    Console.WriteLine($"{processingPrefix}Message already processed, skipping.");
     return false;
   }
 
   // Skip if email was sent by the monitored mailbox itself (avoid loops)
   if (GraphConnector.IsSelf(mailbox, msg))
   {
-    Console.WriteLine($"Message is self-sent, skipping.");
+    Console.WriteLine($"{processingPrefix}Message is self-sent, skipping.");
     db.MarkProcessed(msg.Id!, mailbox, null, "skipped-self");
     return false;
   }
@@ -180,17 +194,17 @@ async Task<bool> ProcessIncommingMessage(string mailbox, Microsoft.Graph.Models.
       // ----------------------------
       // Update existing user story
       // ----------------------------
-      Console.WriteLine($"Updating existing User Story #{existingId}");
+      Console.WriteLine($"{processingPrefix}Updating existing User Story #{existingId}");
 
       string? description = await TfsConnector.WorkItemExistsingDescriptionAsync(wit, existingId);
       if (description == null)
       {
-        Console.WriteLine($"User Story #{existingId} not found in TFS. Sending error reply.");
+        Console.WriteLine($"{processingPrefix}User Story #{existingId} not found in TFS. Sending error reply.");
         await graph.SendErrorReplyAsync(mailbox, msg,
           errorBody: string.Format(app.Graph.UsNotFoundTemplate, existingId));
 
         await graph.CategorizeDoneAsync(msg, mailbox);
-        Console.WriteLine($"Categorized mail as done.");
+        Console.WriteLine($"{processingPrefix}Categorized mail as done.");
 
         db.MarkProcessed(msg.Id!, mailbox, null, "us-not-found");
         return false;
@@ -205,7 +219,6 @@ async Task<bool> ProcessIncommingMessage(string mailbox, Microsoft.Graph.Models.
 
       await TfsConnector.AddCommentAndAttachmentsAsync(
         wit,
-        app.Tfs.Project,
         existingId,
         prepared.html,
         prepared.attachments,
@@ -214,10 +227,10 @@ async Task<bool> ProcessIncommingMessage(string mailbox, Microsoft.Graph.Models.
 
       await graph.SendInfoReplyAsync(mailbox, msg,
         infoBody: string.Format(app.Graph.UsUpdatedTemplate, existingId));
-      Console.WriteLine($"Updated User Story #{existingId} with new comment/attachments.");
+      Console.WriteLine($"{processingPrefix}Updated User Story #{existingId} with new comment/attachments.");
 
       await graph.CategorizeDoneAsync(msg, mailbox);
-      Console.WriteLine($"Categorized mail as done.");
+      Console.WriteLine($"{processingPrefix}Categorized mail as done.");
 
       db.MarkProcessed(msg.Id!, mailbox, existingId, "updated", prepared.html);
     }
@@ -226,7 +239,7 @@ async Task<bool> ProcessIncommingMessage(string mailbox, Microsoft.Graph.Models.
       // ----------------------------
       // Create new user story
       // ----------------------------
-      Console.WriteLine($"Creating new User Story from message");
+      Console.WriteLine($"{processingPrefix}Creating new User Story from message");
 
       var prepared = await Util.PrepareContentAsync(graph, mailbox, msg, mdConverter);
 
@@ -238,23 +251,22 @@ async Task<bool> ProcessIncommingMessage(string mailbox, Microsoft.Graph.Models.
 
       int newId = await TfsConnector.CreateUserStoryAsync(
         wit,
-        app.Tfs.Project,
+        project,
         msg.Subject ?? "(no subject)",
         newDesc
       );
 
-      Console.WriteLine($"Created User Story #{newId}");
+      Console.WriteLine($"{processingPrefix}Created User Story #{newId}");
 
 
       await TfsConnector.AddCommentAndAttachmentsAsync(
         wit,
-        app.Tfs.Project,
         newId,
         prepared.html,
         prepared.attachments
       );
 
-      Console.WriteLine($"Updated User Story #{newId} with new comment/attachments.");
+      Console.WriteLine($"{processingPrefix}Updated User Story #{newId} with new comment/attachments.");
 
       db.LinkStory(mailbox, newId);
 
@@ -264,7 +276,7 @@ async Task<bool> ProcessIncommingMessage(string mailbox, Microsoft.Graph.Models.
       );
 
       await graph.CategorizeDoneAsync(msg, mailbox);
-      Console.WriteLine($"Categorized mail as done.");
+      Console.WriteLine($"{processingPrefix}Categorized mail as done.");
 
       db.MarkProcessed(msg.Id!, mailbox, newId, "created", prepared.html);
     }
@@ -278,7 +290,6 @@ async Task<bool> ProcessIncommingMessage(string mailbox, Microsoft.Graph.Models.
   return true;
 }
 
-
 // ----------------------------
 // Process a single outgoing email
 // ----------------------------
@@ -287,13 +298,13 @@ async Task<bool> ProcessSentMessage(string mailbox, Microsoft.Graph.Models.Messa
   // Skip if we already processed this message
   if (GraphConnector.WasProcessed(msg))
   {
-    Console.WriteLine($"Message already processed, skipping.");
+    Console.WriteLine($"{processingPrefix}Message already processed, skipping.");
     return false;
   }
 
   if (GraphConnector.HasNotificationCategory(msg))
   {
-    Console.WriteLine($"Message is a self emited notification, skipping.");
+    Console.WriteLine($"{processingPrefix}Message is a self emited notification, skipping.");
     return false;
   }
 
@@ -307,13 +318,13 @@ async Task<bool> ProcessSentMessage(string mailbox, Microsoft.Graph.Models.Messa
       // ----------------------------
       // Update existing user story
       // ----------------------------
-      Console.WriteLine($"Updating existing User Story #{existingId}");
+      Console.WriteLine($"{processingPrefix}Updating existing User Story #{existingId}");
 
       string? description = await TfsConnector.WorkItemExistsingDescriptionAsync(wit, existingId);
       if (description == null)
       {
         await graph.CategorizeDoneAsync(msg, mailbox);
-        Console.WriteLine($"Categorized mail as done.");
+        Console.WriteLine($"{processingPrefix}Categorized mail as done.");
 
         db.MarkProcessed(msg.Id!, mailbox, null, "us-not-found");
         return false;
@@ -328,28 +339,27 @@ async Task<bool> ProcessSentMessage(string mailbox, Microsoft.Graph.Models.Messa
 
       await TfsConnector.AddCommentAndAttachmentsAsync(
         wit,
-        app.Tfs.Project,
         existingId,
         prepared.html,
         prepared.attachments,
         newDesc
       );
 
-      Console.WriteLine($"Updated User Story #{existingId} with new comment/attachments.");
+      Console.WriteLine($"{processingPrefix}Updated User Story #{existingId} with new comment/attachments.");
 
       await graph.CategorizeDoneAsync(msg, mailbox);
-      Console.WriteLine($"Categorized mail as done.");
+      Console.WriteLine($"{processingPrefix}Categorized mail as done.");
 
       db.MarkProcessed(msg.Id!, mailbox, existingId, "updated", prepared.html);
     }
     else
     {
-      Console.WriteLine($"Sent mail withoutUser Story reference is ignored.");
+      Console.WriteLine($"{processingPrefix}Sent mail withoutUser Story reference is ignored.");
     }
   }
   catch (Exception ex)
   {
-    Console.Error.WriteLine($"Error processing message: {ex}");
+    Console.Error.WriteLine($"{processingPrefix}Error processing message: {ex}");
     throw; // per requirement: crash and let supervisor retry
   }
 

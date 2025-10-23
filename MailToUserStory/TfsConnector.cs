@@ -43,7 +43,6 @@ namespace MailToUserStory
 
     public static async Task AddCommentAndAttachmentsAsync(
         WorkItemTrackingHttpClient wit,
-        string project,
         int id,
         string commentMarkdown,
         List<AttachmentPayload> attachments,

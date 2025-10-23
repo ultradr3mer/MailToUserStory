@@ -25,6 +25,12 @@ namespace MailToUserStory
 
       var folderId = await ResolveFolderIdAsync(userFolder.User, userFolder.Folder);
 
+      if (folderId == null)
+      {
+        yield return new DeltaPage() { Messages = new List<Message>() };
+        yield break;
+      }
+
       DeltaGetResponse? page;
       if (!string.IsNullOrEmpty(deltaLink))
       {
@@ -158,9 +164,9 @@ namespace MailToUserStory
     public Task SendErrorReplyAsync(string mailbox, Message original, string errorBody)
           => this.SendInfoReplyAsync(mailbox, original, errorBody, null);
 
-    internal static string GetSentMailbox(string mailbox)
+    internal static string GetSentMailbox(string user)
     {
-      return new GraphUserFolder(mailbox).User + "/" + SentItemsWellKnownFolderName;
+      return user + "/" + SentItemsWellKnownFolderName;
     }
 
     internal static bool HasNotificationCategory(Message msg)
