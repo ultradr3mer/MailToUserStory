@@ -19,6 +19,7 @@ using Microsoft.Graph;
 using Microsoft.TeamFoundation.WorkItemTracking.WebApi;
 using Microsoft.VisualStudio.Services.Common;
 using Microsoft.VisualStudio.Services.WebApi;
+using System.Diagnostics;
 
 // ----------------------------
 // Program startup
@@ -33,8 +34,12 @@ var config = new ConfigurationBuilder()
 var app = config.Get<AppConfig>() ?? throw new Exception("Invalid configuration");
 app = app with
 {
-  Graph = app.Graph with { ClientSecret = config["Graph:ClientSecret"] ?? app.Graph.ClientSecret },
-  Tfs = app.Tfs with { Password = config["Tfs:Password"] ?? app.Tfs.Password }
+  Graph = app.Graph with { ClientSecret = config["Graph:ClientSecret"] 
+    ?? Environment.GetEnvironmentVariable("MailToUserStoryGraphClientSecret")
+    ?? app.Graph.ClientSecret },
+  Tfs = app.Tfs with { Password = config["Tfs:Password"]
+    ?? Environment.GetEnvironmentVariable("MailToUserStoryTfsPassword")
+    ?? app.Tfs.Password }
 };
 
 // Verify secrets exist
